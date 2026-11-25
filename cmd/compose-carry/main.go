@@ -1,0 +1,150 @@
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/565431hzhang/compose-carry/internal/carry"
+)
+
+const usage = `compose-carry v0.1.0 — read-only host-path checks before a Compose move
+
+  compose-carry source --config compose.json --out source.json
+  compose-carry target --manifest source.json --out target.json
+  compose-carry compare --source source.json --target target.json --format text|json
+
+Run source on the source Linux host and target on the target Linux host.
+Export config with: docker compose config --format json
+Output files must not exist. Treat snapshots as sensitive metadata.
+Exit codes: 0 scoped checks match; 1 gaps/unverified/no checks; 2 input/runtime error.
+`
+
+func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+
+func run(args []string, out, errOut io.Writer) int {
+	fail := func(err error) int { fmt.Fprintln(errOut, "error:", err); return 2 }
+	if len(args) == 0 {
+		fmt.Fprint(errOut, usage)
+		return 2
+	}
+	if args[0] == "--help" || args[0] == "help" || args[0] == "-h" {
+		fmt.Fprint(out, usage)
+		return 0
+	}
+	if args[0] == "--version" {
+		fmt.Fprintln(out, "compose-carry v0.1.0")
+		return 0
+	}
+	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var config, manifest, output, sourcePath, targetPath, format string
+	switch args[0] {
+	case "source":
+		flags.StringVar(&config, "config", "", "Compose JSON")
+		flags.StringVar(&output, "out", "", "new snapshot")
+	case "target":
+		flags.StringVar(&manifest, "manifest", "", "source snapshot")
+		flags.StringVar(&output, "out", "", "new snapshot")
+	case "compare":
+		flags.StringVar(&sourcePath, "source", "", "source snapshot")
+		flags.StringVar(&targetPath, "target", "", "target snapshot")
+		flags.StringVar(&format, "format", "text", "text or json")
+	default:
+		return fail(fmt.Errorf("unknown command; use --help"))
+	}
+	if err := flags.Parse(args[1:]); err != nil {
+		if err == flag.ErrHelp {
+			fmt.Fprint(out, usage)
+			return 0
+		}
+		return fail(fmt.Errorf("invalid arguments; use --help"))
+	}
+	if flags.NArg() != 0 {
+		return fail(fmt.Errorf("unexpected positional arguments"))
+	}
+	readSnapshot := func(path string) (carry.Snapshot, error) {
+		data, err := carry.ReadInput(path)
+		if err != nil {
+			return carry.Snapshot{}, err
+		}
+		return carry.DecodeSnapshot(data)
+	}
+	if args[0] == "compare" {
+		if sourcePath == "" || targetPath == "" || (format != "text" && format != "json") {
+			return fail(fmt.Errorf("compare requires --source, --target, and --format text|json"))
+		}
+		source, err := readSnapshot(sourcePath)
+		if err != nil {
+			return fail(err)
+		}
+		target, err := readSnapshot(targetPath)
+		if err != nil {
+			return fail(err)
+		}
+		report, err := carry.Compare(source, target)
+		if err != nil {
+			return fail(err)
+		}
+		if format == "json" {
+			encoder := json.NewEncoder(out)
+			encoder.SetIndent("", "  ")
+			if err := encoder.Encode(report); err != nil {
+				return fail(fmt.Errorf("cannot write report"))
+			}
+		} else {
+			if _, err := fmt.Fprintln(out, report.Scope); err != nil {
+				return fail(fmt.Errorf("cannot write report"))
+			}
+			if report.Checked == 0 {
+				if _, err := fmt.Fprintln(out, "No in-scope paths to check; not a successful verification."); err != nil {
+					return fail(fmt.Errorf("cannot write report"))
+				}
+			}
+			for _, r := range report.Results {
+				if _, err := fmt.Fprintf(out, "%-18s service=%q kind=%s path=%q ref=%q expected=%s source=%s/%s target=%s/%s\n", r.Status, r.Dependency.Service, r.Dependency.Kind, r.Dependency.Path, r.Dependency.Reference, r.Expected, r.Source.State, r.Source.Type, r.Target.State, r.Target.Type); err != nil {
+					return fail(fmt.Errorf("cannot write report"))
+				}
+			}
+			if _, err := fmt.Fprintf(out, "In-scope paths: %d; excluded entries: %d; exit: %d\n", report.Checked, report.Excluded, report.ExitCode); err != nil {
+				return fail(fmt.Errorf("cannot write report"))
+			}
+		}
+		return report.ExitCode
+	}
+	if output == "" || (args[0] == "source" && config == "") || (args[0] == "target" && manifest == "") {
+		return fail(fmt.Errorf("missing required input or --out; use --help"))
+	}
+	var snapshot carry.Snapshot
+	var err error
+	if args[0] == "source" {
+		var data []byte
+		data, err = carry.ReadInput(config)
+		if err == nil {
+			var deps []carry.Dependency
+			deps, err = carry.ParseCompose(data)
+			if err == nil {
+				snapshot, err = carry.Source(deps)
+			}
+		}
+	} else {
+		var source carry.Snapshot
+		source, err = readSnapshot(manifest)
+		if err == nil {
+			snapshot, err = carry.Target(source)
+		}
+	}
+	if err != nil {
+		return fail(err)
+	}
+	if err := carry.WriteSnapshot(output, snapshot); err != nil {
+		return fail(err)
+	}
+	code := carry.SnapshotExitCode(snapshot)
+	if _, err := fmt.Fprintf(out, "Wrote %s snapshot (%d entries). Exit: %d.\n%s\n", snapshot.Phase, len(snapshot.Entries), code, carry.Scope); err != nil {
+		return fail(fmt.Errorf("cannot write summary"))
+	}
+	return code
+}
