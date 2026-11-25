@@ -10,10 +10,10 @@ import (
 	"github.com/565431hzhang/compose-carry/internal/carry"
 )
 
-const usage = `compose-carry v0.1.0 — read-only host-path checks before a Compose move
+const usage = `compose-carry v0.2.0 — read-only host-path checks before a Compose move
 
   compose-carry source --config compose.json --out source.json
-  compose-carry target --manifest source.json --out target.json
+  compose-carry target --manifest source.json [--path-map paths.json] --out target.json
   compose-carry compare --source source.json --target target.json --format text|json
 
 Run source on the source Linux host and target on the target Linux host.
@@ -35,18 +35,19 @@ func run(args []string, out, errOut io.Writer) int {
 		return 0
 	}
 	if args[0] == "--version" {
-		fmt.Fprintln(out, "compose-carry v0.1.0")
+		fmt.Fprintln(out, "compose-carry v0.2.0")
 		return 0
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	var config, manifest, output, sourcePath, targetPath, format string
+	var config, manifest, output, sourcePath, targetPath, format, pathMap string
 	switch args[0] {
 	case "source":
 		flags.StringVar(&config, "config", "", "Compose JSON")
 		flags.StringVar(&output, "out", "", "new snapshot")
 	case "target":
 		flags.StringVar(&manifest, "manifest", "", "source snapshot")
+		flags.StringVar(&pathMap, "path-map", "", "JSON object mapping exact source paths to target paths")
 		flags.StringVar(&output, "out", "", "new snapshot")
 	case "compare":
 		flags.StringVar(&sourcePath, "source", "", "source snapshot")
@@ -104,7 +105,7 @@ func run(args []string, out, errOut io.Writer) int {
 				}
 			}
 			for _, r := range report.Results {
-				if _, err := fmt.Fprintf(out, "%-18s service=%q kind=%s path=%q ref=%q expected=%s source=%s/%s target=%s/%s\n", r.Status, r.Dependency.Service, r.Dependency.Kind, r.Dependency.Path, r.Dependency.Reference, r.Expected, r.Source.State, r.Source.Type, r.Target.State, r.Target.Type); err != nil {
+				if _, err := fmt.Fprintf(out, "%-18s service=%q kind=%s source_path=%q target_path=%q ref=%q expected=%s source=%s/%s target=%s/%s\n", r.Status, r.Dependency.Service, r.Dependency.Kind, r.Dependency.Path, r.TargetPath, r.Dependency.Reference, r.Expected, r.Source.State, r.Source.Type, r.Target.State, r.Target.Type); err != nil {
 					return fail(fmt.Errorf("cannot write report"))
 				}
 			}
@@ -132,8 +133,16 @@ func run(args []string, out, errOut io.Writer) int {
 	} else {
 		var source carry.Snapshot
 		source, err = readSnapshot(manifest)
+		var paths map[string]string
+		if err == nil && pathMap != "" {
+			var data []byte
+			data, err = carry.ReadInput(pathMap)
+			if err == nil {
+				paths, err = carry.ParsePathMap(data)
+			}
+		}
 		if err == nil {
-			snapshot, err = carry.Target(source)
+			snapshot, err = carry.TargetWithPaths(source, paths)
 		}
 	}
 	if err != nil {

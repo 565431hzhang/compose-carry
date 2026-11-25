@@ -6,7 +6,7 @@
 
 把 Compose 文件复制过去，不代表宿主机上的配置文件、密钥文件和挂载目录也齐全。本工具对照源机快照，报告目标机的路径缺失、类型不符与未验证项。
 
-v0.1 是早期命令行版本：Linux 主机扫描、跨平台离线比较、无运行时第三方依赖。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
+v0.2 是早期命令行版本：Linux 主机扫描、跨平台离线比较、无运行时第三方依赖。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
 
 ## 构建
 
@@ -41,7 +41,7 @@ docker compose config --format json > compose.json
 
 ### 2. 在目标机检查
 
-通过你自己的安全传输方式带上 `source.json` 和匹配架构的程序。先检查快照里的路径；v0.1 要求两端使用相同绝对路径，暂不支持路径映射。
+通过你自己的安全传输方式带上 `source.json` 和匹配架构的程序。先检查快照里的路径；默认检查相同绝对路径，新旧目录不同时可使用下面的显式映射。
 
 ```sh
 ./compose-carry target --manifest source.json --out target.json
@@ -68,6 +68,28 @@ docker compose config --format json > compose.json
 | `excluded` | 不在本版核对范围，不计为已验证 |
 
 JSON 报告包含核对范围、范围内条目数、排除条目数、退出码以及每项的预期类型和两端观察结果。
+
+## 新旧机器目录不同
+
+在目标机准备私有 `paths.json`，明确写出源路径和目标路径：
+
+```json
+{
+  "/srv/app/data": "/mnt/app/data",
+  "/srv/app/config.json": "/etc/app/config.json"
+}
+```
+
+```sh
+./compose-carry target --manifest source.json --path-map paths.json --out mapped.json
+./compose-carry compare --source source.json --target mapped.json
+```
+
+只做**完整路径精确匹配**：映射 `/srv/app` 不会替换 `/srv/app/data`。键必须是清单内的范围内依赖，两侧必须是规范 Linux 绝对路径；重复键、未知源路径、非字符串和非法路径在扫描前拒绝。同一路径的多个引用共享映射，未映射项仍检查源路径位置；原本非法的源路径继续未验证，不能借映射修复。
+
+文本报告显示 `source_path` 和 `target_path`；JSON 保留 `dependency.path` 作为源路径并新增 `target_path`。源机身份和证据不会改写。工具**不会修改 Compose、搬运文件或确认 Compose 已改用新路径**；请审核映射和报告，匹配仅针对指定路径。
+
+不传映射仍生成 v1 快照；传入映射（包括 `{}`）生成仅用于 target 的 v2 快照，每项必须记录 `target_path`（排除项为空）。未映射的非法路径保留为未验证，不自动规范化。新版能比较原有 v1 快照，v0.1 会拒绝 v2；映射检查和比较都应使用新版程序。映射文件也有敏感路径元数据，受 16 MiB 输入限制。
 
 ## 核对范围
 
@@ -114,7 +136,7 @@ COMPOSE_CARRY_TEST_COMPOSE=1 go test ./cmd/compose-carry -run TestComposeExport 
 
 ## 后续方向
 
-按实际搬迁案例逐步增加显式路径映射、外部卷/网络元数据，以及边界明确的权限诊断，不扩张成部署平台。
+显式路径映射已实现；后续按实际搬迁案例增加外部卷/网络元数据，以及边界明确的权限诊断，不扩张成部署平台。
 
 [Troubleshoot](https://github.com/replicatedhq/troubleshoot)、[DCLint](https://github.com/zavoloklom/docker-compose-linter)、[Compose Volume Check](https://github.com/Profen-BLF/compose-volume-check) 已解决相邻问题；本项目聚焦源机依赖与目标机实际路径的核对，不宣称首创或替代这些项目。
 

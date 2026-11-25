@@ -186,6 +186,61 @@ func TestPathValidation(t *testing.T) {
 	}
 }
 
+func TestPathMapParsing(t *testing.T) {
+	for _, input := range []string{`null`, `[]`, `{"/a":null}`, `{"/a":1}`, `{"/a":"/b","/a":"/c"}`, `{"relative":"/b"}`, `{"/a":"/b/../c"}`, `{"/a":""}`, `{"/a":"${ROOT}"}`} {
+		if _, err := ParsePathMap([]byte(input)); err == nil {
+			t.Errorf("accepted %s", input)
+		}
+	}
+	paths, err := ParsePathMap([]byte(`{"/a":"/new a"}`))
+	if err != nil || paths["/a"] != "/new a" {
+		t.Fatal(paths, err)
+	}
+	paths, err = ParsePathMap([]byte(`{}`))
+	if err != nil || paths == nil {
+		t.Fatal("empty explicit mapping must retain v2 intent")
+	}
+}
+
+func TestMappedSnapshots(t *testing.T) {
+	s, target := fixtures()
+	p := "/destination/data"
+	target.Version = MappedVersion
+	target.Entries[0].TargetPath = &p
+	raw, _ := json.Marshal(target)
+	decoded, err := DecodeSnapshot(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := Compare(s, decoded)
+	if err != nil || r.ExitCode != 0 || r.Results[0].TargetPath != p || r.Results[0].Dependency.Path != "/srv/data" {
+		t.Fatal(r, err)
+	}
+	for _, input := range []string{
+		strings.Replace(string(raw), `,"target_path":"/destination/data"`, "", 1),
+		strings.Replace(string(raw), `"target_path":"/destination/data"`, `"target_path":null`, 1),
+		strings.Replace(string(raw), `"/destination/data"`, `"relative"`, 1),
+		strings.Replace(string(raw), `"version":2`, `"version":1`, 1),
+		strings.Replace(string(raw), `"phase":"target"`, `"phase":"source"`, 1),
+	} {
+		if _, err := DecodeSnapshot([]byte(input)); err == nil {
+			t.Errorf("accepted invalid mapped snapshot %s", input)
+		}
+	}
+	s.Entries[0].Source = Observation{"missing", "unknown"}
+	s.Entries[0].Expected = "unknown"
+	target.Entries[0].Source = s.Entries[0].Source
+	target.Entries[0].Expected = s.Entries[0].Expected
+	r, err = Compare(s, target)
+	if err != nil || r.Results[0].Status != "source_unverified" || r.ExitCode != 1 {
+		t.Fatal(r, err)
+	}
+	target.Entries[0].Source = Observation{"permission_denied", "unknown"}
+	if _, err := Compare(s, target); err == nil {
+		t.Fatal("accepted altered source evidence")
+	}
+}
+
 func FuzzParseCompose(f *testing.F) {
 	f.Add([]byte(`{"services":{"app":{"volumes":[{"type":"bind","source":"/srv/data","target":"/data"}]}}}`))
 	f.Fuzz(func(t *testing.T, data []byte) {

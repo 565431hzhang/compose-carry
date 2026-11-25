@@ -10,6 +10,7 @@ import (
 )
 
 const Version = 1
+const MappedVersion = 2
 const MaxInputBytes = 16 << 20
 
 type Observation struct {
@@ -22,6 +23,15 @@ type Entry struct {
 	Expected   string       `json:"expected"`
 	Source     Observation  `json:"source"`
 	Target     *Observation `json:"target"`
+	TargetPath *string      `json:"target_path,omitempty"`
+}
+
+func (e Entry) targetDependency() Dependency {
+	d := e.Dependency
+	if e.TargetPath != nil {
+		d.Path = *e.TargetPath
+	}
+	return d
 }
 
 type Snapshot struct {
@@ -58,7 +68,10 @@ func validObservation(o Observation, d Dependency) bool {
 
 func (s Snapshot) Validate() error {
 	invalid := errors.New("invalid snapshot structure or state")
-	if s.Version != Version || (s.Phase != "source" && s.Phase != "target") || s.Entries == nil {
+	if (s.Version != Version && s.Version != MappedVersion) || (s.Phase != "source" && s.Phase != "target") || s.Entries == nil {
+		return invalid
+	}
+	if s.Version == MappedVersion && s.Phase != "target" {
 		return invalid
 	}
 	seen := map[string]bool{}
@@ -83,10 +96,25 @@ func (s Snapshot) Validate() error {
 		if !validObservation(e.Source, d) || e.Expected != expectedType(d, e.Source) {
 			return invalid
 		}
+		if s.Version == Version && e.TargetPath != nil {
+			return invalid
+		}
+		if s.Version == MappedVersion {
+			if e.TargetPath == nil {
+				return invalid
+			}
+			if d.Kind == "excluded" {
+				if *e.TargetPath != "" {
+					return invalid
+				}
+			} else if *e.TargetPath != d.Path && (!validPath(d.Path) || !validPath(*e.TargetPath)) {
+				return invalid
+			}
+		}
 		if s.Phase == "source" && e.Target != nil {
 			return invalid
 		}
-		if s.Phase == "target" && (e.Target == nil || !validObservation(*e.Target, d)) {
+		if s.Phase == "target" && (e.Target == nil || !validObservation(*e.Target, e.targetDependency())) {
 			return invalid
 		}
 	}
@@ -156,8 +184,16 @@ func snapshotKeys(data []byte) bool {
 	if json.Unmarshal(root["entries"], &entries) != nil || entries == nil {
 		return false
 	}
+	var version int
+	if json.Unmarshal(root["version"], &version) != nil || (version != Version && version != MappedVersion) {
+		return false
+	}
+	keys := []string{"dependency", "expected", "source", "target"}
+	if version == MappedVersion {
+		keys = append(keys, "target_path")
+	}
 	for _, raw := range entries {
-		e, ok := exactKeys(raw, "dependency", "expected", "source", "target")
+		e, ok := exactKeys(raw, keys...)
 		if !ok {
 			return false
 		}

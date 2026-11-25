@@ -155,4 +155,29 @@ func TestBinaryEndToEnd(t *testing.T) {
 	}
 	command(0, "target", "--manifest", source, "--out", fixed)
 	command(0, "compare", "--source", source, "--target", fixed)
+	moved := filepath.Join(root, "moved-data")
+	if err := os.Rename(directory, moved); err != nil {
+		t.Fatal(err)
+	}
+	mapping := filepath.Join(root, "paths.json")
+	paths, _ := json.Marshal(map[string]string{directory: moved})
+	if err := os.WriteFile(mapping, paths, 0600); err != nil {
+		t.Fatal(err)
+	}
+	mapped := filepath.Join(root, "mapped.json")
+	command(0, "target", "--manifest", source, "--path-map", mapping, "--out", mapped)
+	output = command(0, "compare", "--source", source, "--target", mapped)
+	if !strings.Contains(string(output), "target_path="+`"`+moved+`"`) {
+		t.Fatal(string(output))
+	}
+	for _, invalid := range []string{`{"/not-listed":"/elsewhere"}`, `{"/a":"/b","/a":"/c"}`} {
+		if err := os.WriteFile(mapping, []byte(invalid), 0600); err != nil {
+			t.Fatal(err)
+		}
+		rejected := filepath.Join(root, "rejected.json")
+		command(2, "target", "--manifest", source, "--path-map", mapping, "--out", rejected)
+		if _, err := os.Stat(rejected); !os.IsNotExist(err) {
+			t.Fatal("invalid mapping created output")
+		}
+	}
 }

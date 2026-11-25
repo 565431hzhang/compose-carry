@@ -13,6 +13,7 @@ type Result struct {
 	Source     Observation `json:"source"`
 	Target     Observation `json:"target"`
 	Status     string      `json:"status"`
+	TargetPath string      `json:"target_path"`
 }
 
 type Report struct {
@@ -43,7 +44,7 @@ func Compare(source, target Snapshot) (Report, error) {
 		if !ok || s.Dependency != t.Dependency || s.Expected != t.Expected || s.Source != t.Source {
 			return Report{}, errors.New("snapshots do not match: dependency or source evidence differs")
 		}
-		result := Result{Dependency: s.Dependency, Expected: s.Expected, Source: s.Source, Target: *t.Target}
+		result := Result{Dependency: s.Dependency, Expected: s.Expected, Source: s.Source, Target: *t.Target, TargetPath: t.targetDependency().Path}
 		switch {
 		case s.Dependency.Kind == "excluded":
 			result.Status = "excluded"

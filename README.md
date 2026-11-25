@@ -6,7 +6,7 @@
 
 `compose-carry` compares the source host's bind mounts and file-backed configs/secrets with paths on the destination host. It answers a small question: **which listed paths are missing, have the wrong type, or could not be checked?**
 
-It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.1 is an early CLI: Linux host scanning, portable offline comparison, no runtime dependencies outside the operating system. Docker Compose is needed only to export your configuration.
+It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.2 is an early CLI: Linux host scanning, portable offline comparison, no runtime dependencies outside the operating system. Docker Compose is needed only to export your configuration.
 
 ## Build
 
@@ -41,7 +41,7 @@ docker compose config --format json > compose.json
 
 ### 2. Destination host
 
-Transfer only `source.json` and the appropriate binary using your own secure transport. Inspect the snapshot before scanning: it names paths to check. In v0.1 the paths must be identical on both hosts; path remapping is not implemented.
+Transfer only `source.json` and the appropriate binary using your own secure transport. Inspect the snapshot before scanning: it names paths to check. By default the paths are identical on both hosts. For different destination paths, provide an explicit map as described below.
 
 ```sh
 ./compose-carry target --manifest source.json --out target.json
@@ -61,18 +61,40 @@ Put both snapshots on the same machine:
 Illustrative result statuses:
 
 ```text
-target_missing     service="proxy" kind=config path="/srv/proxy/config.json" ...
-type_mismatch      service="db" kind=bind path="/srv/db/data" ...
-matched            service="worker" kind=secret path="/srv/worker/token" ...
+target_missing     service="proxy" kind=config source_path="/srv/proxy/config.json" target_path="/etc/proxy/config.json" ...
+type_mismatch      service="db" kind=bind source_path="/srv/db/data" target_path="/mnt/db/data" ...
+matched            service="worker" kind=secret source_path="/srv/worker/token" target_path="/srv/worker/token" ...
 ```
 
 `matched` means **existence and file/directory type only**, not identical contents or working permissions. JSON includes the scope, in-scope/excluded counts, exit code, and each dependency's expected type and both observations.
+
+## Different destination paths
+
+Create a private `paths.json` mapping exact source paths to destination paths:
+
+```json
+{
+  "/srv/app/data": "/mnt/app/data",
+  "/srv/app/config.json": "/etc/app/config.json"
+}
+```
+
+```sh
+./compose-carry target --manifest source.json --path-map paths.json --out mapped.json
+./compose-carry compare --source source.json --target mapped.json
+```
+
+Keys must name in-scope source dependencies; both sides must be canonical absolute Linux paths. Duplicate keys, unknown sources, non-string values and invalid paths are rejected before scanning. This is **exact matching**, not a directory-prefix rewrite: mapping `/srv/app` does not map `/srv/app/data`. Shared references use the same mapping; omitted paths keep their source location. Existing invalid source paths remain unverified and cannot be repaired through a map.
+
+Reports show `source_path` and `target_path` in text; JSON keeps the source in `dependency.path` and adds `target_path`. Source identity and observations are preserved. The tool does **not** change Compose configuration, move files, or verify that Compose uses the mapped paths. Review the map and the report; mapped success is only about those explicitly selected paths.
+
+No map means snapshot format v1. Supplying a map, even `{}`, creates a target-only v2 snapshot with `target_path` on every entry (empty for excluded entries). Unmapped invalid paths are retained as unverified, never silently normalized. This version reads v1 and v2; v0.1 rejects v2. Use the new binary for both mapped scanning and comparison. Mapping files contain sensitive path metadata and share the 16 MiB input limit.
 
 ## What is checked
 
 - Long-form bind mounts from rendered Compose JSON; their expected type comes from the source host's metadata, not the path's extension.
 - Only service-referenced, file-backed `configs` and `secrets`; these must be regular files.
-- The same exact absolute path on the destination host. File/ancestor symlinks are not followed; special files, unreadable metadata, missing source paths and non-canonical/unresolved paths remain unverified.
+- The exact absolute source path, or its explicit mapped destination path. File/ancestor symlinks are not followed; special files, unreadable metadata, missing source paths and non-canonical/unresolved paths remain unverified.
 - Snapshot version, exact field names, dependency IDs, duplicate entries, legal states, complete dependency sets and preserved source evidence. Mismatched snapshots fail rather than silently comparing their intersection.
 
 Named volumes, non-bind mounts, external/environment/inline config and secret sources are recorded as excluded entries. Networks and other Compose features are outside the scope and are not inventoried. Excluded entries are never counted as verified. An exit code of zero applies only to in-scope paths; exclusions do not independently make it nonzero when in-scope paths match.
@@ -115,7 +137,7 @@ That test invokes `docker compose config`, not `up`, and pulls no images. CI run
 
 ## Direction
 
-Keep the project focused on host dependency gaps. Potential next increments, guided by actual migration cases: explicit path mapping, external volume/network metadata, and carefully scoped permission diagnostics. No deployment platform or automatic migration is planned for v0.1.
+Keep the project focused on host dependency gaps. Potential next increments, guided by actual migration cases: external volume/network metadata and carefully scoped permission diagnostics. No deployment platform or automatic migration is planned.
 
 [Replicated Troubleshoot](https://github.com/replicatedhq/troubleshoot), [DCLint](https://github.com/zavoloklom/docker-compose-linter), and [Compose Volume Check](https://github.com/Profen-BLF/compose-volume-check) solve adjacent problems; this project concentrates on checking the destination host against a source-host path snapshot, rather than replacing those tools. No claim of being the first or only such tool is made.
 
