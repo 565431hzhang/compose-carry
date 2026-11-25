@@ -1,0 +1,12 @@
+/compose-carry
+/compose-carry.exe
+/bin/
+*.test
+*.test.exe
+/compose.json
+/source.json
+/target.json
+*.snapshot.json
+.env
+.env.*
+.claude/
