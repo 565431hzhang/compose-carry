@@ -220,7 +220,7 @@ Linux 测试覆盖缺失、类型变化、祖先符号链接、FIFO、非 root �
 COMPOSE_CARRY_TEST_COMPOSE=1 go test ./cmd/compose-carry -run TestComposeExport -v
 ```
 
-只运行 `docker compose config`，不启动容器或拉镜像。CI 在非 root Linux 上执行扫描、Compose 导出集成测试及 amd64/arm64 编译；Windows 测试覆盖离线比较和拒绝扫描。
+该测试只运行 `docker compose config`，不启动容器或拉镜像。原生 Linux CI 在 AMD64、ARM64 上执行 race、Compose 导出、Docker 资源检查和安装包冒烟测试；Windows 测试覆盖离线比较和拒绝扫描。
 
 显式在可用于测试的 Docker daemon 上验收资源检查：测试会创建唯一命名的空卷和内部网络，按记录的名称/ID 删除并确认清理，不启动容器。
 
@@ -228,7 +228,15 @@ COMPOSE_CARRY_TEST_COMPOSE=1 go test ./cmd/compose-carry -run TestComposeExport 
 COMPOSE_CARRY_TEST_RESOURCES=1 go test ./cmd/compose-carry -run TestDockerResourcesIntegration -v
 ```
 
-资源集成测试为显式启用，默认 CI 不创建 Docker 资源；无 daemon 单元测试覆盖查询失败、歧义、输出上限和截止时间。
+资源集成测试在本地须显式启用，在一次性原生 Linux CI runner 上明确启用；无 daemon 单元测试覆盖查询失败、歧义、输出上限和截止时间。
+
+### 原生架构与迁移 CI
+
+两个源端 job 使用标准 `ubuntu-24.04` 和 `ubuntu-24.04-arm` 并行运行。每个 job 启动独立的源端、目标端特权 DinD 容器；扫描程序在对应文件系统命名空间内以 UID 1000、零有效 capabilities 执行，只有 daemon 设置需要特权。覆盖缺失、类型不符、修复、映射、链接、权限拒绝和两端外部资源差异。不挂宿主 Docker socket，不发布 daemon TCP 端口。
+
+随后两个目标端 job 并行，分别在原生 ARM64 检查 AMD64 生成的源快照，以及反方向核对。仅通过 job outputs 传递编码后不超过16 KiB的合成快照，输出缺失、架构或提交不匹配直接失败；不用 QEMU 或外部中转。这是容器隔离测试，不等同于两台物理机。
+
+所有 job 要求公开仓库，只使用标准 runner；Linux 最长25分钟、Windows 最长10分钟。关闭缓存，不上传 Actions artifacts 或持久构建缓存；安装包只在 runner 临时生成，测试后删除。DinD 容器及匿名卷由 finally 和 always 步骤清理；硬取消后由 GitHub 销毁临时 runner。显式标签发行附件与测试产物分开。免费依赖 GitHub 的公开仓库标准 runner 政策，不代表能控制账号其他工作流或费用。
 
 ## 打包与发行审核
 
@@ -241,7 +249,7 @@ COMPOSE_CARRY_RELEASE_DIR=../../dist go test ./cmd/package-release -run TestRele
 
 `dist` 必须不存在。生成三个压缩包与独立的 `SHA256SUMS`，每包仅含程序、许可证和两份 README。版本单源为 `internal/buildinfo/version.go`，传入 `--version vX.Y.Z` 时必须一致。源码构建显示 `commit dev`，发行包嵌入实际提交号。压缩包元数据和顺序固定，但不承诺不同 Go 版本间逐字节可重复。
 
-标签发行工作流只接受与源码版本一致的 `vMAJOR.MINOR.PATCH`，等待 Linux/Windows 测试通过后创建**草稿**。不会自动推送标签或覆盖已有发行；人工检查说明和附件后再公开。CI 核对包内容、哈希和原生 Windows/Linux amd64 程序，不执行 ARM64 二进制。
+标签发行工作流只接受与源码版本一致的 `vMAJOR.MINOR.PATCH`，等待 Linux/Windows 测试通过后创建**草稿**。不会自动推送标签或覆盖已有发行；人工检查说明和附件后再公开。CI 配置为核对包内容、哈希并执行原生 Windows amd64、Linux amd64/arm64 程序；实际验证以对应工作流结果为准，不重写历史发行说明。
 
 ## 后续方向
 

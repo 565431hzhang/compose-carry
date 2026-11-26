@@ -1,0 +1,76 @@
+name: linux-native
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        required: true
+        type: string
+      mode:
+        required: true
+        type: string
+      source_snapshot:
+        required: false
+        type: string
+        default: ''
+    outputs:
+      snapshot:
+        value: ${{ jobs.native.outputs.snapshot }}
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    if: ${{ github.event.repository.private == false && (inputs.arch == 'amd64' || inputs.arch == 'arm64') && (inputs.mode == 'source' || inputs.mode == 'target') }}
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 25
+    outputs:
+      snapshot: ${{ steps.migration.outputs.snapshot }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: stable
+          cache: false
+      - name: Assert native architecture and non-root runner
+        env:
+          EXPECTED_ARCH: ${{ inputs.arch }}
+        run: |
+          test "$(id -u)" -ne 0
+          test "$(go env GOARCH)" = "$EXPECTED_ARCH"
+          uname -m
+          go version
+          docker compose version
+          test -z "$(gofmt -l .)"
+      - name: Native race, Compose and Docker resource tests
+        if: inputs.mode == 'source'
+        env:
+          COMPOSE_CARRY_TEST_COMPOSE: '1'
+          COMPOSE_CARRY_TEST_RESOURCES: '1'
+        run: |
+          go vet ./...
+          go test -race -count=1 -timeout=8m -v ./...
+      - name: Build and execute native installation package
+        if: inputs.mode == 'source'
+        run: |
+          go run ./cmd/package-release --out dist
+          COMPOSE_CARRY_RELEASE_DIR=../../dist go test -count=1 ./cmd/package-release -run TestReleaseArtifacts -v
+      - name: Isolated same-architecture or cross-architecture migration
+        id: migration
+        env:
+          CARRY_CI_STATE: ${{ runner.temp }}/carry-ci-state.json
+          TEST_MODE: ${{ inputs.mode }}
+          TEST_ARCH: ${{ inputs.arch }}
+          SOURCE_SNAPSHOT: ${{ inputs.source_snapshot }}
+        run: python3 -I scripts/ci-migration.py "$TEST_MODE" --arch "$TEST_ARCH"
+      - name: Clean owned containers even after a failed step
+        if: always()
+        env:
+          CARRY_CI_STATE: ${{ runner.temp }}/carry-ci-state.json
+        run: python3 -I scripts/ci-migration.py cleanup
+      - name: Remove local packages
+        if: always()
+        run: python3 -I -c "import shutil; shutil.rmtree('dist', ignore_errors=True)"

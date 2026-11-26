@@ -221,7 +221,7 @@ Linux tests exercise ancestor symlinks, FIFOs, missing/type-mismatched paths, no
 COMPOSE_CARRY_TEST_COMPOSE=1 go test ./cmd/compose-carry -run TestComposeExport -v
 ```
 
-That test invokes `docker compose config`, not `up`, and pulls no images. CI runs Linux tests as a non-root user, exercises a real Compose export, and cross-compiles amd64/arm64 binaries. Windows tests cover offline comparison and explicit scan rejection.
+That test invokes `docker compose config`, not `up`, and pulls no images. The native Linux CI jobs run race, Compose export, Docker resource and package smoke tests on both AMD64 and ARM64. Windows tests cover offline comparison and explicit scan rejection.
 
 To explicitly test against a disposable Docker daemon, the integration test creates uniquely named empty volumes and internal networks, removes them by recorded name/ID, and verifies cleanup. It never starts containers:
 
@@ -229,7 +229,15 @@ To explicitly test against a disposable Docker daemon, the integration test crea
 COMPOSE_CARRY_TEST_RESOURCES=1 go test ./cmd/compose-carry -run TestDockerResourcesIntegration -v
 ```
 
-The resource integration test is opt-in, not enabled by the default CI workflow. Unit tests cover failed queries, ambiguity, output limits and deadlines without a daemon.
+The resource integration test is opt-in locally and explicitly enabled on disposable native Linux CI runners. Unit tests cover failed queries, ambiguity, output limits and deadlines without a daemon.
+
+### Native architecture and migration CI
+
+Two source jobs run concurrently on standard `ubuntu-24.04` and `ubuntu-24.04-arm`. Each runs two independent privileged DinD containers: source and destination. The scanner executes inside the corresponding filesystem namespace as UID 1000 with zero effective capabilities; only daemon setup is privileged. Tests cover missing/type-mismatched paths, repairs, mapping, symlinks, permission denial and independent external resources. No host Docker socket is mounted and no daemon TCP port is published.
+
+Two destination jobs then run concurrently, checking AMD64 source snapshots on native ARM64 and the reverse. Only small synthetic snapshots, bounded to 16 KiB after base64 encoding, cross jobs through outputs; missing/mismatched outputs fail the test. No QEMU or external relay is used. These are container-isolated environments, not two physical servers.
+
+All jobs require a public repository and use standard runners. Linux jobs stop after 25 minutes, Windows after 10. Setup caches are disabled; no Actions artifacts or persistent build caches are uploaded. Packages exist only temporarily on the runner and are removed after tests. DinD containers and their anonymous volumes are removed on normal/failure exits with an always-run fallback; GitHub disposes of the runner after hard cancellation. Explicit tag-triggered Release attachments are separate from test artifacts. Free execution relies on GitHub's public-repository standard-runner policy; these safeguards do not control other account workflows or charges.
 
 ## Packaging and release review
 
@@ -242,7 +250,7 @@ COMPOSE_CARRY_RELEASE_DIR=../../dist go test ./cmd/package-release -run TestRele
 
 `dist` must not exist. The packager produces three archives and a separate `SHA256SUMS`, with only the executable, license and two READMEs in each archive. `internal/buildinfo/version.go` is the single version source; `--version vX.Y.Z` must match it. Source builds show `commit dev`, while packaged binaries embed the actual commit. Archives have fixed metadata/order; byte reproducibility across different Go versions is not promised.
 
-The tag-triggered release workflow accepts only `vMAJOR.MINOR.PATCH` matching the source version, waits for the Linux/Windows test workflow, and creates a **draft** release. No tag is pushed automatically. An existing release is never overwritten; review notes and assets before manually publishing. CI exercises package hashes/contents and the native Windows/Linux amd64 executables, but does not run ARM64 binaries.
+The tag-triggered release workflow accepts only `vMAJOR.MINOR.PATCH` matching the source version, waits for the Linux/Windows test workflow, and creates a **draft** release. No tag is pushed automatically. An existing release is never overwritten; review notes and assets before manually publishing. CI is configured to check package hashes/contents and execute native Windows amd64 and Linux amd64/arm64 packages. Consult the corresponding workflow result for actual validation; historical release notes are not rewritten.
 
 ## Direction
 

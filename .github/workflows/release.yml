@@ -13,10 +13,12 @@ concurrency:
 
 jobs:
   verify:
+    if: github.event.repository.private == false
     uses: ./.github/workflows/test.yml
   publish-draft:
+    if: github.event.repository.private == false
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write

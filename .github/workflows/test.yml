@@ -10,50 +10,59 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          go-version: stable
-          cache: false
-      - name: Check formatting and environment
-        run: |
-          test -z "$(gofmt -l .)"
-          test "$(id -u)" -ne 0
-          docker compose version
-      - run: go vet ./...
-      - name: Unit, scan, binary and Compose-export tests
-        env:
-          COMPOSE_CARRY_TEST_COMPOSE: "1"
-        run: go test -race -count=1 -v ./...
-      - name: Compile Linux architectures
-        run: |
-          GOOS=linux GOARCH=amd64 go build ./...
-          GOOS=linux GOARCH=arm64 go build ./...
-      - name: Build installable packages
-        run: go run ./cmd/package-release --out dist
-      - name: Verify package contents, checksums and native binary
-        env:
-          COMPOSE_CARRY_RELEASE_DIR: ../../dist
-        run: go test -count=1 ./cmd/package-release -run TestReleaseArtifacts -v
+  amd64-source:
+    if: github.event.repository.private == false
+    uses: ./.github/workflows/linux-native.yml
+    with:
+      arch: amd64
+      mode: source
+  arm64-source:
+    if: github.event.repository.private == false
+    uses: ./.github/workflows/linux-native.yml
+    with:
+      arch: arm64
+      mode: source
+  amd64-target:
+    if: github.event.repository.private == false
+    needs: [amd64-source, arm64-source]
+    uses: ./.github/workflows/linux-native.yml
+    with:
+      arch: amd64
+      mode: target
+      source_snapshot: ${{ needs.arm64-source.outputs.snapshot }}
+  arm64-target:
+    if: github.event.repository.private == false
+    needs: [amd64-source, arm64-source]
+    uses: ./.github/workflows/linux-native.yml
+    with:
+      arch: arm64
+      mode: target
+      source_snapshot: ${{ needs.amd64-source.outputs.snapshot }}
   windows:
-    runs-on: windows-latest
+    if: github.event.repository.private == false
+    runs-on: windows-2022
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version: stable
           cache: false
       - run: go test -count=1 ./...
       - run: go vet ./...
-      - name: Build installable packages
+      - name: Build installable packages locally
         run: go run ./cmd/package-release --out dist
       - name: Verify package contents, checksums and native binary
         env:
           COMPOSE_CARRY_RELEASE_DIR: ../../dist
         run: go test -count=1 ./cmd/package-release -run TestReleaseArtifacts -v
+      - name: Remove local packages
+        if: always()
+        run: Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
