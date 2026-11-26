@@ -15,7 +15,7 @@ v0.4 是早期命令行版本：Linux 主机路径扫描、跨平台离线比较
 | 系统 | 包名后缀 | 支持范围 |
 | --- | --- | --- |
 | Linux x86-64 | `linux_amd64.tar.gz` | 全部命令 |
-| Linux ARM64 | `linux_arm64.tar.gz` | 全部命令；仅交叉编译，尚未硬件实测 |
+| Linux ARM64 | `linux_arm64.tar.gz` | 全部命令；当前源码及安装包已通过原生 ARM64 CI |
 | Windows x86-64 | `windows_amd64.zip` | 离线比较和 Docker 资源查询，不支持路径扫描 |
 
 从同一发行版本下载所需压缩包与 `SHA256SUMS`，放到新的空目录。Linux 先校验再解压（将 VERSION、ARCH 换成实际版本、架构）：

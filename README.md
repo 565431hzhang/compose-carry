@@ -15,7 +15,7 @@ Binary packages are published only after a release draft is reviewed. If the [Re
 | Host | Package suffix | Support |
 | --- | --- | --- |
 | Linux x86-64 | `linux_amd64.tar.gz` | All commands |
-| Linux ARM64 | `linux_arm64.tar.gz` | All commands; cross-compiled, not yet hardware-tested |
+| Linux ARM64 | `linux_arm64.tar.gz` | All commands; current source and packages tested on native ARM64 CI |
 | Windows x86-64 | `windows_amd64.zip` | Offline compare and Docker resources; no path scan |
 
 Download the package for your host and `SHA256SUMS` from the **same version** into a new empty directory. On Linux, verify the downloaded package before extracting (replace VERSION and ARCH with the selected release and architecture):
