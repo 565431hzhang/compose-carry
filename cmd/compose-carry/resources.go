@@ -65,10 +65,30 @@ func boundedCommand(ctx context.Context, limit int, program string, args ...stri
 	cmd.Stderr = io.Discard
 	cmd.WaitDelay = time.Second
 	err := cmd.Run()
-	if err != nil || output.exceeded || child.Err() != nil {
-		return nil, errors.New("Docker query unavailable")
+	if failure := classifyQueryFailure(err, child.Err(), output.exceeded); failure != nil {
+		return nil, failure
 	}
 	return output.buffer.Bytes(), nil
+}
+
+func classifyQueryFailure(err, contextErr error, exceeded bool) error {
+	var exit *exec.ExitError
+	switch {
+	case exceeded:
+		return carry.QueryOutputLimit
+	case errors.Is(contextErr, context.DeadlineExceeded):
+		return carry.QueryTimeout
+	case errors.Is(contextErr, context.Canceled):
+		return carry.QueryCanceled
+	case errors.Is(err, exec.ErrNotFound), errors.Is(err, os.ErrNotExist):
+		return carry.QueryCommandNotFound
+	case errors.As(err, &exit):
+		return carry.QueryCommandFailed
+	case err != nil:
+		return carry.QueryIOError
+	default:
+		return nil
+	}
 }
 
 func queryDocker(ctx context.Context, args ...string) ([]byte, error) {
@@ -133,6 +153,11 @@ func runResources(args []string, out, errOut io.Writer, runner resourceRunner) i
 			refs, _ := json.Marshal(result.References)
 			if _, err := fmt.Fprintf(out, "%-10s kind=%s name=%q reason=%s references=%s\n", result.Status, result.Kind, result.Name, result.Reason, refs); err != nil {
 				return fail("cannot write resource report")
+			}
+			if result.Hint != "" {
+				if _, err := fmt.Fprintf(out, "  hint: %s\n", result.Hint); err != nil {
+					return fail("cannot write resource report")
+				}
 			}
 		}
 		if _, err := fmt.Fprintf(out, "Resources: %d; exit: %d\n", len(report.Results), report.ExitCode); err != nil {

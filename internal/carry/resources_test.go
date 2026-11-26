@@ -103,6 +103,12 @@ func TestResourceInventoryMatching(t *testing.T) {
 			if calls != 1 || len(report.Results) != 1 || report.Results[0].Status != tc.status || report.Results[0].Reason != tc.reason {
 				t.Fatal(report)
 			}
+			if tc.status == "present" && report.Results[0].Hint != "" {
+				t.Fatal("unnecessary success hint")
+			}
+			if tc.status != "present" && report.Results[0].Hint == "" {
+				t.Fatal("missing diagnostic hint")
+			}
 			want := 1
 			if tc.status == "present" {
 				want = 0

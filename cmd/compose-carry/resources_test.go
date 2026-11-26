@@ -146,11 +146,12 @@ func TestBoundedCommand(t *testing.T) {
 		limit   int
 		timeout time.Duration
 		ok      bool
+		reason  carry.QueryError
 	}{
-		{"ok", 128, 10 * time.Second, true},
-		{"fail", 128, 10 * time.Second, false},
-		{"overflow", 32, 10 * time.Second, false},
-		{"wait", 128, 150 * time.Millisecond, false},
+		{"ok", 128, 10 * time.Second, true, ""},
+		{"fail", 128, 10 * time.Second, false, carry.QueryCommandFailed},
+		{"overflow", 32, 10 * time.Second, false, carry.QueryOutputLimit},
+		{"wait", 128, 150 * time.Millisecond, false, carry.QueryTimeout},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), tc.timeout)
@@ -159,6 +160,12 @@ func TestBoundedCommand(t *testing.T) {
 			if (err == nil) != tc.ok {
 				t.Fatal(string(data), err)
 			}
+			if !tc.ok {
+				var failure carry.QueryError
+				if !errors.As(err, &failure) || failure != tc.reason {
+					t.Fatal("wrong classification", err, failure)
+				}
+			}
 			if tc.ok && string(data) != "projected" {
 				t.Fatal(string(data))
 			}
@@ -166,6 +173,87 @@ func TestBoundedCommand(t *testing.T) {
 				t.Fatal(string(data), err)
 			}
 		})
+	}
+}
+
+func TestQueryFailureClassification(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-installed-docker")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	data, err := boundedCommand(ctx, 128, missing)
+	if len(data) != 0 || !errors.Is(err, carry.QueryCommandNotFound) || strings.Contains(err.Error(), missing) {
+		t.Fatal(err)
+	}
+	canceled, stop := context.WithCancel(context.Background())
+	stop()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = boundedCommand(canceled, 128, executable, "-test.run=^TestResourceSubprocess$", "--", "resource-helper", "ok")
+	if len(data) != 0 || !errors.Is(err, carry.QueryCanceled) {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		err, contextErr error
+		exceeded        bool
+		want            carry.QueryError
+	}{
+		{errors.New("private-start-error"), nil, false, carry.QueryIOError},
+		{errors.New("private-exit-error"), context.Canceled, true, carry.QueryOutputLimit},
+		{errors.New("private-exit-error"), context.DeadlineExceeded, true, carry.QueryOutputLimit},
+		{nil, context.DeadlineExceeded, false, carry.QueryTimeout},
+	} {
+		got := classifyQueryFailure(tc.err, tc.contextErr, tc.exceeded)
+		if !errors.Is(got, tc.want) || strings.Contains(got.Error(), "private-") {
+			t.Fatal(got)
+		}
+	}
+	if classifyQueryFailure(nil, nil, false) != nil {
+		t.Fatal("successful query classified as failure")
+	}
+}
+
+func TestResourcesSafeHints(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "compose.json")
+	if err := os.WriteFile(config, []byte(`{"services":{"app":{"volumes":[{"type":"volume","source":"data"}]}},"volumes":{"data":{"external":true}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		err    error
+		reason string
+	}{
+		{carry.QueryCommandNotFound, "command_not_found"},
+		{carry.QueryTimeout, "timeout"},
+		{carry.QueryOutputLimit, "output_limit"},
+		{carry.QueryCommandFailed, "command_failed"},
+		{carry.QueryIOError, "io_error"},
+		{carry.QueryCanceled, "query_canceled"},
+		{errors.New("private-token=secret-value"), "query_failed"},
+		{carry.QueryError("private-token=secret-value"), "query_failed"},
+	} {
+		var expectedHint string
+		for _, format := range []string{"json", "text"} {
+			var out, stderr bytes.Buffer
+			code := runResources([]string{"--config", config, "--docker-context", "selected", "--format", format}, &out, &stderr, func(context.Context, ...string) ([]byte, error) {
+				return []byte("private-partial-output"), fmt.Errorf("private-token=secret-value: %w", tc.err)
+			})
+			if code != 1 || strings.Contains(out.String()+stderr.String(), "private-") || strings.Contains(out.String()+stderr.String(), "secret-value") {
+				t.Fatal(code, out.String(), stderr.String())
+			}
+			if format == "json" {
+				var report carry.ResourceReport
+				if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+					t.Fatal(err)
+				}
+				if report.ExitCode != code || report.Summary.Unverified != 1 || len(report.Results) != 1 || report.Results[0].Reason != tc.reason || report.Results[0].Hint == "" {
+					t.Fatal(report)
+				}
+				expectedHint = report.Results[0].Hint
+			} else if !strings.Contains(out.String(), "reason="+tc.reason) || !strings.Contains(out.String(), "hint: "+expectedHint) {
+				t.Fatal(out.String())
+			}
+		}
 	}
 }
 

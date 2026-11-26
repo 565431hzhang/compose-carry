@@ -22,10 +22,64 @@ type Resource struct {
 	References []ResourceReference `json:"references"`
 }
 
+type QueryError string
+
+const (
+	QueryCommandNotFound QueryError = "command_not_found"
+	QueryTimeout         QueryError = "timeout"
+	QueryOutputLimit     QueryError = "output_limit"
+	QueryCommandFailed   QueryError = "command_failed"
+	QueryCanceled        QueryError = "query_canceled"
+	QueryIOError         QueryError = "io_error"
+)
+
+func (QueryError) Error() string { return "Docker query unavailable" }
+
+func queryReason(err error) string {
+	var failure QueryError
+	if errors.As(err, &failure) {
+		switch failure {
+		case QueryCommandNotFound, QueryTimeout, QueryOutputLimit, QueryCommandFailed, QueryCanceled, QueryIOError:
+			return string(failure)
+		}
+	}
+	return "query_failed"
+}
+
+func resourceHint(reason string) string {
+	switch reason {
+	case "command_not_found":
+		return "Install Docker CLI and ensure it is available on PATH."
+	case "timeout":
+		return "Check the selected Docker context and daemon connectivity; retry when the daemon responds."
+	case "output_limit":
+		return "The Docker inventory exceeds 16 MiB; inspect it locally or use a context with a smaller inventory."
+	case "command_failed":
+		return "Check the selected context, daemon access and credentials with Docker CLI locally; raw diagnostics are not included."
+	case "query_canceled":
+		return "The query was canceled; retry when ready."
+	case "io_error":
+		return "Check Docker CLI executable permissions and local process or pipe failures."
+	case "query_failed":
+		return "Check the selected Docker context with Docker CLI locally; the query could not be verified."
+	case "invalid_inventory":
+		return "Check Docker CLI compatibility and projected list output locally; the inventory could not be parsed."
+	case "ambiguous_reference":
+		return "Use an unambiguous full network ID or resource name and regenerate the Compose JSON."
+	case "unresolved_name":
+		return "Render Compose variables and inspect the resource name before retrying."
+	case "not_found":
+		return "Verify the resource name and selected Docker context; resource contents and readiness are not checked."
+	default:
+		return ""
+	}
+}
+
 type ResourceResult struct {
 	Resource
 	Status string `json:"status"`
 	Reason string `json:"reason"`
+	Hint   string `json:"hint,omitempty"`
 }
 
 type ResourceSummary struct {
@@ -273,7 +327,7 @@ func CheckResources(resources []Resource, dockerContext string, query func(strin
 		}
 		data, err := query(kind)
 		if err != nil {
-			reasons[kind] = "query_failed"
+			reasons[kind] = queryReason(err)
 			continue
 		}
 		inventory, err := parseInventory(kind, data)
@@ -309,6 +363,7 @@ func CheckResources(resources []Resource, dockerContext string, query func(strin
 				result.Reason = "ambiguous_reference"
 			}
 		}
+		result.Hint = resourceHint(result.Reason)
 		switch result.Status {
 		case "present":
 			report.Summary.Present++

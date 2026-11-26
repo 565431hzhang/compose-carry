@@ -160,6 +160,25 @@ JSON 成功写出时，`exit_code` 与进程退出码一致；输出故障仍返
 
 退出码：至少一项且全部存在为 `0`，缺失/未验证/无项为 `1`，参数、输入或报告写入错误为 `2`；无项时不调用 Docker。存在不代表卷内容、驱动、子网、连接性、权限或应用可用。Docker context 及传输助手由用户管理，须可信；该命令不会启动容器或修改 Docker 资源。
 
+### 资源查询诊断
+
+查询故障仍为 `unverified`、退出 `1`；JSON 和文本都增加固定 `hint`，不回显原始 stderr、部分 stdout 或异常详情。v0.4.1 将原因细分为：
+
+| 原因码 | 排查方向 |
+| --- | --- |
+| `command_not_found` | 安装 Docker CLI，检查 PATH。 |
+| `timeout` | 检查选定 context 和 daemon 连通性后重试。 |
+| `output_limit` | 清单 stdout 超过16 MiB，在本地检查清单规模。 |
+| `command_failed` | 用 Docker CLI 在本地检查 context、访问权限和凭据。 |
+| `query_canceled` | 本次已取消，准备好后重试；不是超时。 |
+| `io_error` | 检查程序执行权限、进程或管道故障。 |
+| `query_failed` | 未分类故障，在本地查看 Docker 诊断。 |
+| `invalid_inventory` | 检查 Docker CLI 兼容性及清单投影格式。 |
+| `ambiguous_reference` | 使用无歧义的完整 ID/名称，重新导出 Compose JSON。 |
+| `unresolved_name` | 解析 Compose 变量并核查资源名称。 |
+
+`not_found` 仍代表有效清单里没有候选，现在附带核对名称/context 的建议；`found` 不添加提示。`command_failed` 不等于“daemon离线”或“没有权限”，具体原因需要在本地查看 Docker 自身报错。原状态、退出码和路径快照格式不变；调用方遇到将来新增原因码不能直接当成成功。
+
 ## 路径流程核对范围
 
 - Compose 渲染后的长语法 bind mount；预期文件/目录类型来自源机实际元数据，不靠后缀猜测。

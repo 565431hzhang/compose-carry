@@ -159,6 +159,25 @@ Results are `present`, `missing`, or `unverified`, with summary counts and reaso
 
 Exit codes: `0` requires at least one resource and all present; `1` means missing, unverified or no resources; `2` means input/argument/report-write failure. No resources means no Docker call. Presence does not prove volume contents, driver/subnet compatibility, connectivity, permissions or application readiness. Docker contexts and their transport helpers are user-managed and must be trusted; no containers are started and no Docker resources are modified by this command.
 
+### Resource diagnostics
+
+Failures remain `unverified` with exit `1`; JSON and text include a fixed `hint` without raw stderr, partial stdout or exception details. In v0.4.1, query reasons distinguish:
+
+| Reason | Next step |
+| --- | --- |
+| `command_not_found` | Install Docker CLI and check PATH. |
+| `timeout` | Check selected context/daemon connectivity, then retry. |
+| `output_limit` | Inspect the oversized inventory locally; stdout exceeded 16 MiB. |
+| `command_failed` | Check context, access and credentials with Docker CLI locally. |
+| `query_canceled` | Retry when ready; cancellation is not a timeout. |
+| `io_error` | Check executable permissions or process/pipe failures. |
+| `query_failed` | Unclassified failure; inspect Docker locally. |
+| `invalid_inventory` | Check Docker CLI compatibility and projected list output. |
+| `ambiguous_reference` | Use an unambiguous full ID/name and regenerate Compose JSON. |
+| `unresolved_name` | Resolve Compose variables and inspect the name. |
+
+`not_found` still means missing from a valid inventory and now suggests checking the name/context. `found` has no hint. `command_failed` does not prove the daemon is offline or access is denied: those require examining Docker's own diagnostics locally. Existing statuses/exit codes and path snapshot formats are unchanged. Consumers should accept unknown future reason codes instead of treating them as success.
+
 ## What the path workflow checks
 
 - Long-form bind mounts from rendered Compose JSON; their expected type comes from the source host's metadata, not the path's extension.
