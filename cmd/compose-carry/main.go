@@ -10,17 +10,43 @@ import (
 	"github.com/565431hzhang/compose-carry/internal/carry"
 )
 
-const usage = `compose-carry v0.2.0 — read-only host-path checks before a Compose move
+const usage = `compose-carry v0.3.0 — read-only host-path checks before a Compose move
 
   compose-carry source --config compose.json --out source.json
   compose-carry target --manifest source.json [--path-map paths.json] --out target.json
   compose-carry compare --source source.json --target target.json --format text|json
+    [--only-problems] [--fail-on-excluded]
+
+Compare options: --only-problems hides matched entries, not exclusions.
+--fail-on-excluded returns 1 for recorded exclusions, not uninventoried resources.
 
 Run source on the source Linux host and target on the target Linux host.
 Export config with: docker compose config --format json
 Output files must not exist. Treat snapshots as sensitive metadata.
-Exit codes: 0 scoped checks match; 1 gaps/unverified/no checks; 2 input/runtime error.
+Exit codes: 0 scoped checks match; 1 gaps/unverified/no checks/policy failure; 2 input/runtime error.
 `
+
+type compareOutput struct {
+	carry.Report
+	OnlyProblems   bool `json:"only_problems"`
+	FailOnExcluded bool `json:"fail_on_excluded"`
+}
+
+func prepareReport(report carry.Report, onlyProblems, failOnExcluded bool) compareOutput {
+	if failOnExcluded && report.Excluded > 0 {
+		report.ExitCode = 1
+	}
+	if onlyProblems {
+		results := make([]carry.Result, 0, len(report.Results))
+		for _, result := range report.Results {
+			if result.Status != "matched" {
+				results = append(results, result)
+			}
+		}
+		report.Results = results
+	}
+	return compareOutput{Report: report, OnlyProblems: onlyProblems, FailOnExcluded: failOnExcluded}
+}
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
@@ -35,12 +61,13 @@ func run(args []string, out, errOut io.Writer) int {
 		return 0
 	}
 	if args[0] == "--version" {
-		fmt.Fprintln(out, "compose-carry v0.2.0")
+		fmt.Fprintln(out, "compose-carry v0.3.0")
 		return 0
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var config, manifest, output, sourcePath, targetPath, format, pathMap string
+	var onlyProblems, failOnExcluded bool
 	switch args[0] {
 	case "source":
 		flags.StringVar(&config, "config", "", "Compose JSON")
@@ -53,6 +80,8 @@ func run(args []string, out, errOut io.Writer) int {
 		flags.StringVar(&sourcePath, "source", "", "source snapshot")
 		flags.StringVar(&targetPath, "target", "", "target snapshot")
 		flags.StringVar(&format, "format", "text", "text or json")
+		flags.BoolVar(&onlyProblems, "only-problems", false, "hide matched entries; retain full summary")
+		flags.BoolVar(&failOnExcluded, "fail-on-excluded", false, "return 1 when recorded exclusions exist")
 	default:
 		return fail(fmt.Errorf("unknown command; use --help"))
 	}
@@ -85,10 +114,11 @@ func run(args []string, out, errOut io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
-		report, err := carry.Compare(source, target)
+		fullReport, err := carry.Compare(source, target)
 		if err != nil {
 			return fail(err)
 		}
+		report := prepareReport(fullReport, onlyProblems, failOnExcluded)
 		if format == "json" {
 			encoder := json.NewEncoder(out)
 			encoder.SetIndent("", "  ")
@@ -98,6 +128,18 @@ func run(args []string, out, errOut io.Writer) int {
 		} else {
 			if _, err := fmt.Fprintln(out, report.Scope); err != nil {
 				return fail(fmt.Errorf("cannot write report"))
+			}
+			s := report.Summary
+			if _, err := fmt.Fprintf(out, "Full summary: matched=%d target_missing=%d type_mismatch=%d source_unverified=%d target_unverified=%d excluded=%d\n", s.Matched, s.TargetMissing, s.TypeMismatch, s.SourceUnverified, s.TargetUnverified, s.Excluded); err != nil {
+				return fail(fmt.Errorf("cannot write report"))
+			}
+			if _, err := fmt.Fprintf(out, "View: only_problems=%t; fail_on_excluded=%t; shown=%d of %d entries\n", report.OnlyProblems, report.FailOnExcluded, len(report.Results), report.Checked+report.Excluded); err != nil {
+				return fail(fmt.Errorf("cannot write report"))
+			}
+			if report.OnlyProblems && len(report.Results) == 0 && report.Checked > 0 {
+				if _, err := fmt.Fprintln(out, "No in-scope problems; matched entries hidden. Application readiness is not verified."); err != nil {
+					return fail(fmt.Errorf("cannot write report"))
+				}
 			}
 			if report.Checked == 0 {
 				if _, err := fmt.Fprintln(out, "No in-scope paths to check; not a successful verification."); err != nil {

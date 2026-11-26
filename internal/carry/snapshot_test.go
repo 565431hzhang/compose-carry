@@ -42,6 +42,21 @@ func TestCompareStates(t *testing.T) {
 			if err != nil || r.ExitCode != c.code || len(r.Results) != 1 || r.Results[0].Status != c.status {
 				t.Fatalf("%+v %v", r, err)
 			}
+			encoded, _ := json.Marshal(r.Summary)
+			var counts map[string]int
+			if err := json.Unmarshal(encoded, &counts); err != nil {
+				t.Fatal(err)
+			}
+			if len(counts) != 6 || counts[c.status] != 1 {
+				t.Fatal(counts)
+			}
+			total := 0
+			for _, count := range counts {
+				total += count
+			}
+			if total != 1 {
+				t.Fatal(counts)
+			}
 			if SnapshotExitCode(d) != c.code {
 				t.Fatal("snapshot and report disagree")
 			}
@@ -80,7 +95,7 @@ func TestEmptyAndExcluded(t *testing.T) {
 	d := Snapshot{Version: Version, Phase: "target", Entries: []Entry{}}
 	for i := 0; i < 2; i++ {
 		r, err := Compare(s, d)
-		if err != nil || r.ExitCode != 1 || r.Checked != 0 || r.Excluded != i {
+		if err != nil || r.ExitCode != 1 || r.Checked != 0 || r.Excluded != i || r.Summary != (Summary{Excluded: i}) {
 			t.Fatalf("%+v %v", r, err)
 		}
 		o := Observation{"excluded", "unknown"}

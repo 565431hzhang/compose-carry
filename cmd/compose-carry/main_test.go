@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -62,6 +64,164 @@ func TestOfflineCompareCLI(t *testing.T) {
 		} else if !strings.Contains(out.String(), "matched") {
 			t.Fatal(out.String())
 		}
+	}
+}
+
+type brokenWriter struct{}
+
+func (brokenWriter) Write([]byte) (int, error) { return 0, errors.New("closed output") }
+
+func TestCompareOptions(t *testing.T) {
+	cases := []struct {
+		name   string
+		states []string
+	}{
+		{"mixed", []string{"matched", "target_missing", "type_mismatch", "source_unverified", "target_unverified", "excluded"}},
+		{"matched", []string{"matched", "matched"}},
+		{"matched-excluded", []string{"matched", "excluded"}},
+		{"excluded", []string{"excluded"}},
+		{"empty", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := carry.Snapshot{Version: carry.Version, Phase: "source", Entries: []carry.Entry{}}
+			target := carry.Snapshot{Version: carry.MappedVersion, Phase: "target", Entries: []carry.Entry{}}
+			counts := map[string]int{"matched": 0, "target_missing": 0, "type_mismatch": 0, "source_unverified": 0, "target_unverified": 0, "excluded": 0}
+			for i, state := range tc.states {
+				counts[state]++
+				kind := "bind"
+				if state == "excluded" {
+					kind = "volume"
+				}
+				deps, err := carry.ParseCompose([]byte(fmt.Sprintf(`{"services":{"app":{"volumes":[{"type":%q,"source":"/srv/data","target":%q}]}}}`, kind, fmt.Sprintf("/mount%d", i))))
+				if err != nil {
+					t.Fatal(err)
+				}
+				observed := carry.Observation{State: "observed", Type: "directory"}
+				e := carry.Entry{Dependency: deps[0], Expected: "directory", Source: observed}
+				to := observed
+				p := "/destination/data"
+				switch state {
+				case "target_missing":
+					to = carry.Observation{State: "missing", Type: "unknown"}
+				case "type_mismatch":
+					to.Type = "file"
+				case "source_unverified":
+					e.Source = carry.Observation{State: "missing", Type: "unknown"}
+					e.Expected = "unknown"
+				case "target_unverified":
+					to = carry.Observation{State: "symlink", Type: "unknown"}
+				case "excluded":
+					e.Source = carry.Observation{State: "excluded", Type: "unknown"}
+					e.Expected = "unknown"
+					to = e.Source
+					p = ""
+				}
+				source.Entries = append(source.Entries, e)
+				e.Target = &to
+				e.TargetPath = &p
+				target.Entries = append(target.Entries, e)
+			}
+			root := t.TempDir()
+			sp, tp := filepath.Join(root, "source.json"), filepath.Join(root, "target.json")
+			if err := carry.WriteSnapshot(sp, source); err != nil {
+				t.Fatal(err)
+			}
+			if err := carry.WriteSnapshot(tp, target); err != nil {
+				t.Fatal(err)
+			}
+			beforeS, _ := os.ReadFile(sp)
+			beforeT, _ := os.ReadFile(tp)
+			checked := len(tc.states) - counts["excluded"]
+			for _, only := range []bool{false, true} {
+				for _, strict := range []bool{false, true} {
+					for _, format := range []string{"text", "json"} {
+						args := []string{"compare", "--source", sp, "--target", tp, "--format", format, fmt.Sprintf("--only-problems=%t", only), fmt.Sprintf("--fail-on-excluded=%t", strict)}
+						wantCode := 0
+						if checked == 0 || checked != counts["matched"] || (strict && counts["excluded"] > 0) {
+							wantCode = 1
+						}
+						shown := len(tc.states)
+						if only {
+							shown -= counts["matched"]
+						}
+						var out, stderr bytes.Buffer
+						code := run(args, &out, &stderr)
+						if code != wantCode {
+							t.Fatalf("%v exit %d: %s", args, code, stderr.String())
+						}
+						if format == "json" {
+							var got compareOutput
+							if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+								t.Fatal(err)
+							}
+							if got.ExitCode != code || got.Checked != checked || got.Excluded != counts["excluded"] || got.Results == nil || len(got.Results) != shown || got.OnlyProblems != only || got.FailOnExcluded != strict {
+								t.Fatal(out.String())
+							}
+							encoded, _ := json.Marshal(got.Summary)
+							var summary map[string]int
+							json.Unmarshal(encoded, &summary)
+							if len(summary) != 6 {
+								t.Fatal(summary)
+							}
+							for status, count := range counts {
+								if summary[status] != count {
+									t.Fatal(summary, counts)
+								}
+							}
+							for _, r := range got.Results {
+								if only && r.Status == "matched" {
+									t.Fatal("matched result not hidden")
+								}
+								if r.Status != "excluded" && (r.TargetPath != "/destination/data" || r.Dependency.Path != "/srv/data") {
+									t.Fatal("lost mapping")
+								}
+							}
+						} else {
+							for status, count := range counts {
+								if !strings.Contains(out.String(), fmt.Sprintf("%s=%d", status, count)) {
+									t.Fatal(out.String())
+								}
+							}
+							if strings.Count(out.String(), "service=") != shown || !strings.Contains(out.String(), fmt.Sprintf("exit: %d", code)) {
+								t.Fatal(out.String())
+							}
+							if only && checked > 0 && shown == 0 && !strings.Contains(out.String(), "No in-scope problems") {
+								t.Fatal(out.String())
+							}
+						}
+						if run(args, brokenWriter{}, &stderr) != 2 {
+							t.Fatal("output failure must return 2")
+						}
+					}
+				}
+			}
+			afterS, _ := os.ReadFile(sp)
+			afterT, _ := os.ReadFile(tp)
+			if !bytes.Equal(beforeS, afterS) || !bytes.Equal(beforeT, afterT) {
+				t.Fatal("modified snapshots")
+			}
+			var out, stderr bytes.Buffer
+			if code := run([]string{"compare", "--source", sp, "--target", sp, "--only-problems", "--fail-on-excluded"}, &out, &stderr); code != 2 {
+				t.Fatal("options bypassed phase validation")
+			}
+		})
+	}
+	for _, command := range []string{"source", "target"} {
+		for _, option := range []string{"--only-problems", "--fail-on-excluded"} {
+			var out, stderr bytes.Buffer
+			if run([]string{command, option}, &out, &stderr) != 2 || !strings.Contains(stderr.String(), "invalid arguments") {
+				t.Fatal(command, option, stderr.String())
+			}
+		}
+	}
+}
+
+func TestPrepareReportDoesNotMutate(t *testing.T) {
+	r := carry.Report{Results: []carry.Result{{Status: "matched"}, {Status: "excluded"}}, Excluded: 1, Checked: 1, Summary: carry.Summary{Matched: 1, Excluded: 1}}
+	got := prepareReport(r, true, true)
+	if r.ExitCode != 0 || len(r.Results) != 2 || r.Results[0].Status != "matched" || got.ExitCode != 1 || len(got.Results) != 1 || got.Summary != r.Summary {
+		t.Fatal(r, got)
 	}
 }
 

@@ -6,7 +6,7 @@
 
 `compose-carry` compares the source host's bind mounts and file-backed configs/secrets with paths on the destination host. It answers a small question: **which listed paths are missing, have the wrong type, or could not be checked?**
 
-It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.2 is an early CLI: Linux host scanning, portable offline comparison, no runtime dependencies outside the operating system. Docker Compose is needed only to export your configuration.
+It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.3 is an early CLI: Linux host scanning, portable offline comparison, no runtime dependencies outside the operating system. Docker Compose is needed only to export your configuration.
 
 ## Build
 
@@ -68,6 +68,21 @@ matched            service="worker" kind=secret source_path="/srv/worker/token" 
 
 `matched` means **existence and file/directory type only**, not identical contents or working permissions. JSON includes the scope, in-scope/excluded counts, exit code, and each dependency's expected type and both observations.
 
+## Focus on problems and control exclusions
+
+```sh
+./compose-carry compare --source source.json --target target.json --only-problems
+./compose-carry compare --source source.json --target target.json --only-problems --fail-on-excluded --format json
+```
+
+Every comparison includes a full `summary` with six counts: `matched`, `target_missing`, `type_mismatch`, `source_unverified`, `target_unverified`, and `excluded`, including zeros. Counts are per dependency entry, not unique path; `checked` is the number of in-scope entries, not successes.
+
+`--only-problems` hides only matched result rows, retaining exclusions. It never changes the full summary, counts or exit decision. JSON explicitly includes `only_problems` and `fail_on_excluded`; a filtered empty `results` is `[]`, not a claim that nothing was checked. Text shows the full summary before rows and the number shown.
+
+`--fail-on-excluded` returns `1` when any **recorded** excluded entry exists, even when all in-scope paths match. Default behavior remains unchanged. Both options apply only to `compare`; snapshot formats v1/v2 and source/target behavior are unchanged. Networks and other uninventoried resources remain unchecked even with this option: this is not a complete migration gate.
+
+For successfully written JSON, `exit_code` equals the process exit code. An output failure returns `2`; any partial report must be discarded.
+
 ## Different destination paths
 
 Create a private `paths.json` mapping exact source paths to destination paths:
@@ -97,7 +112,7 @@ No map means snapshot format v1. Supplying a map, even `{}`, creates a target-on
 - The exact absolute source path, or its explicit mapped destination path. File/ancestor symlinks are not followed; special files, unreadable metadata, missing source paths and non-canonical/unresolved paths remain unverified.
 - Snapshot version, exact field names, dependency IDs, duplicate entries, legal states, complete dependency sets and preserved source evidence. Mismatched snapshots fail rather than silently comparing their intersection.
 
-Named volumes, non-bind mounts, external/environment/inline config and secret sources are recorded as excluded entries. Networks and other Compose features are outside the scope and are not inventoried. Excluded entries are never counted as verified. An exit code of zero applies only to in-scope paths; exclusions do not independently make it nonzero when in-scope paths match.
+Named volumes, non-bind mounts, external/environment/inline config and secret sources are recorded as excluded entries. Networks and other Compose features are outside the scope and are not inventoried. Excluded entries are never counted as verified. An exit code of zero applies only to in-scope paths; by default, exclusions do not independently make it nonzero when in-scope paths match.
 
 Paths containing `$` or backslashes are conservatively unverified even if those characters are literal. Relative paths and paths needing normalization are also unverified. This is not a full Compose schema validator; give it the effective JSON produced by Compose, not raw YAML or hand-authored shorthand.
 
@@ -106,7 +121,7 @@ Paths containing `$` or backslashes are conservatively unverified even if those 
 | Code | Meaning |
 | --- | --- |
 | `0` | At least one in-scope path; all in-scope checks succeeded (and match for target/compare). |
-| `1` | A gap, type mismatch, unverified source/target, or no in-scope paths. |
+| `1` | A gap, type mismatch, unverified source/target, no in-scope paths, or recorded exclusions with `compare --fail-on-excluded`. |
 | `2` | Bad arguments/input/snapshot, unsupported scan platform, or a command-level read/write failure. |
 
 A scan that exits `1` still writes a valid snapshot; use it for diagnosis and comparison. Do not chain all three steps with `&&` if you want a report despite gaps. Use a new output filename for each scan.

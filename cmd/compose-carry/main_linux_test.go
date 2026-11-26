@@ -170,6 +170,56 @@ func TestBinaryEndToEnd(t *testing.T) {
 	if !strings.Contains(string(output), "target_path="+`"`+moved+`"`) {
 		t.Fatal(string(output))
 	}
+	output = command(0, "compare", "--source", source, "--target", mapped, "--only-problems", "--format", "json")
+	var filtered compareOutput
+	if err := json.Unmarshal(output, &filtered); err != nil {
+		t.Fatal(err)
+	}
+	if filtered.ExitCode != 0 || filtered.Results == nil || len(filtered.Results) != 0 || filtered.Summary.Matched != 2 || !filtered.OnlyProblems {
+		t.Fatal(string(output))
+	}
+	sData, err := carry.ReadInput(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tData, err := carry.ReadInput(mapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := carry.DecodeSnapshot(sData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetSnapshot, err := carry.DecodeSnapshot(tData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps, err := carry.ParseCompose([]byte(`{"services":{"extra":{"volumes":[{"type":"volume","source":"data","target":"/data"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := carry.Observation{State: "excluded", Type: "unknown"}
+	e := carry.Entry{Dependency: deps[0], Expected: "unknown", Source: o}
+	s.Entries = append(s.Entries, e)
+	p := ""
+	e.Target = &o
+	e.TargetPath = &p
+	targetSnapshot.Entries = append(targetSnapshot.Entries, e)
+	sp, tp := filepath.Join(root, "excluded-source.json"), filepath.Join(root, "excluded-target.json")
+	if err := carry.WriteSnapshot(sp, s); err != nil {
+		t.Fatal(err)
+	}
+	if err := carry.WriteSnapshot(tp, targetSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	command(0, "compare", "--source", sp, "--target", tp, "--only-problems")
+	output = command(1, "compare", "--source", sp, "--target", tp, "--only-problems", "--fail-on-excluded", "--format", "json")
+	if err := json.Unmarshal(output, &filtered); err != nil {
+		t.Fatal(err)
+	}
+	if filtered.ExitCode != 1 || len(filtered.Results) != 1 || filtered.Results[0].Status != "excluded" || filtered.Summary.Matched != 2 || filtered.Summary.Excluded != 1 || !filtered.FailOnExcluded {
+		t.Fatal(string(output))
+	}
 	for _, invalid := range []string{`{"/not-listed":"/elsewhere"}`, `{"/a":"/b","/a":"/c"}`} {
 		if err := os.WriteFile(mapping, []byte(invalid), 0600); err != nil {
 			t.Fatal(err)

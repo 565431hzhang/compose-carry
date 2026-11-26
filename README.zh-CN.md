@@ -6,7 +6,7 @@
 
 把 Compose 文件复制过去，不代表宿主机上的配置文件、密钥文件和挂载目录也齐全。本工具对照源机快照，报告目标机的路径缺失、类型不符与未验证项。
 
-v0.2 是早期命令行版本：Linux 主机扫描、跨平台离线比较、无运行时第三方依赖。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
+v0.3 是早期命令行版本：Linux 主机扫描、跨平台离线比较、无运行时第三方依赖。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
 
 ## 构建
 
@@ -69,6 +69,21 @@ docker compose config --format json > compose.json
 
 JSON 报告包含核对范围、范围内条目数、排除条目数、退出码以及每项的预期类型和两端观察结果。
 
+## 聚焦问题与排除项策略
+
+```sh
+./compose-carry compare --source source.json --target target.json --only-problems
+./compose-carry compare --source source.json --target target.json --only-problems --fail-on-excluded --format json
+```
+
+报告新增全量 `summary`，固定包含 matched、target_missing、type_mismatch、source_unverified、target_unverified、excluded 六类计数，零值也保留。按依赖条目计数，不按唯一路径去重；`checked` 是范围内条目数，不是成功数。
+
+`--only-problems` 只隐藏 matched 行，排除项仍显示；全量汇总、计数和退出判定不受过滤影响。JSON 显式包含 `only_problems`、`fail_on_excluded`，过滤后的空 `results` 是 `[]`，不代表没有执行检查。文本先显示全量汇总，再列条目并说明显示数量。
+
+`--fail-on-excluded` 在存在**已记录**的排除项时返回 `1`，即使范围内路径全部匹配。默认策略不变。两个选项仅用于 compare，不改变 source/target 行为和 v1/v2 快照格式。网络等未枚举资源仍未检查，不能将该选项当作完整迁移准入检查。
+
+JSON 成功写出时，`exit_code` 与进程退出码一致；输出故障仍返回 `2`，部分写出的报告应丢弃。
+
 ## 新旧机器目录不同
 
 在目标机准备私有 `paths.json`，明确写出源路径和目标路径：
@@ -98,14 +113,14 @@ JSON 报告包含核对范围、范围内条目数、排除条目数、退出码
 - 路径本身及任意祖先含符号链接时均不跟随。特殊文件、元数据访问受限、源路径缺失、相对或未解析路径均不能标为通过。
 - 快照严格校验版本、字段名、依赖 ID、重复项、状态组合、完整依赖集合及源机证据；不只比较两份文件的交集。
 
-命名卷、非 bind 挂载、external/environment/inline 等来源记录为排除项；网络等其他 Compose 功能不检查，也不逐项列入清单。只要范围内的项目全部匹配，存在排除项本身不会导致非零退出码。
+命名卷、非 bind 挂载、external/environment/inline 等来源记录为排除项；网络等其他 Compose 功能不检查，也不逐项列入清单。默认只要范围内的项目全部匹配，存在排除项本身不会导致非零退出码；compare 可用 `--fail-on-excluded` 改变该策略。
 
 路径含 `$` 或反斜杠时，即使是合法字面字符，也保守标为未验证；需要规范化的路径同样不扫描。本工具不替代完整 Compose schema 校验，请输入 Compose 导出的有效 JSON，而不是原始 YAML 或手写短语法。
 
 ## 退出码
 
 - `0`：至少有一项范围内依赖，范围内全部检查成功（target/compare 还要求类型匹配）。
-- `1`：有缺口、类型不符、未验证项，或没有可检查路径。
+- `1`：有缺口、类型不符、未验证项、没有可检查路径，或 compare 指定 `--fail-on-excluded` 时存在已记录排除项。
 - `2`：参数、输入、快照无效，平台不支持扫描，或命令级输入输出错误。
 
 扫描返回 `1` 时仍会写出有效快照，用于继续诊断。需要在有缺口时继续生成报告，不要简单用 `&&` 串联整个流程。再次扫描请使用新输出文件名。

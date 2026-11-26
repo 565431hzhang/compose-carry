@@ -16,7 +16,17 @@ type Result struct {
 	TargetPath string      `json:"target_path"`
 }
 
+type Summary struct {
+	Matched          int `json:"matched"`
+	TargetMissing    int `json:"target_missing"`
+	TypeMismatch     int `json:"type_mismatch"`
+	SourceUnverified int `json:"source_unverified"`
+	TargetUnverified int `json:"target_unverified"`
+	Excluded         int `json:"excluded"`
+}
+
 type Report struct {
+	Summary  Summary  `json:"summary"`
 	Scope    string   `json:"scope"`
 	Checked  int      `json:"checked"`
 	Excluded int      `json:"excluded"`
@@ -61,6 +71,20 @@ func Compare(source, target Snapshot) (Report, error) {
 			result.Status = "type_mismatch"
 		default:
 			result.Status = "matched"
+		}
+		switch result.Status {
+		case "matched":
+			report.Summary.Matched++
+		case "target_missing":
+			report.Summary.TargetMissing++
+		case "type_mismatch":
+			report.Summary.TypeMismatch++
+		case "source_unverified":
+			report.Summary.SourceUnverified++
+		case "target_unverified":
+			report.Summary.TargetUnverified++
+		case "excluded":
+			report.Summary.Excluded++
 		}
 		if result.Status != "excluded" {
 			report.Checked++
