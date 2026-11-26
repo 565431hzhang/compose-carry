@@ -1,6 +1,7 @@
 /compose-carry
 /compose-carry.exe
 /bin/
+/dist/
 *.test
 *.test.exe
 /compose.json

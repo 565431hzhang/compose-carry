@@ -14,6 +14,20 @@ import (
 	"github.com/565431hzhang/compose-carry/internal/carry"
 )
 
+func TestVersionOutput(t *testing.T) {
+	var version, help, stderr bytes.Buffer
+	if run([]string{"--version"}, &version, &stderr) != 0 || run([]string{"--help"}, &help, &stderr) != 0 {
+		t.Fatal(stderr.String())
+	}
+	parts := strings.Fields(version.String())
+	if len(parts) < 2 || !strings.Contains(help.String(), "compose-carry "+parts[1]) {
+		t.Fatal("help and version disagree")
+	}
+	if run([]string{"--version"}, brokenWriter{}, &stderr) != 2 {
+		t.Fatal("ignored output failure")
+	}
+}
+
 func TestArguments(t *testing.T) {
 	cases := []struct {
 		args []string

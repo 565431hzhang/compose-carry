@@ -8,6 +8,44 @@
 
 It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.4 is an early CLI: Linux host-path scanning, portable offline comparison, and an optional Docker CLI-based external resource check. Docker Compose exports your configuration; only `resources` requires Docker CLI access to a daemon.
 
+## Install a packaged binary
+
+Binary packages are published only after a release draft is reviewed. If the [Releases page](https://github.com/565431hzhang/compose-carry/releases) has no published assets, use the source build below; GitHub's automatic source archives are not binary packages.
+
+| Host | Package suffix | Support |
+| --- | --- | --- |
+| Linux x86-64 | `linux_amd64.tar.gz` | All commands |
+| Linux ARM64 | `linux_arm64.tar.gz` | All commands; cross-compiled, not yet hardware-tested |
+| Windows x86-64 | `windows_amd64.zip` | Offline compare and Docker resources; no path scan |
+
+Download the package for your host and `SHA256SUMS` from the **same version** into a new empty directory. On Linux, verify the downloaded package before extracting (replace VERSION and ARCH with the selected release and architecture):
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+mkdir unpacked
+tar -xzf compose-carry_VERSION_linux_ARCH.tar.gz -C unpacked
+mkdir -p "$HOME/.local/bin"
+install -m 0755 unpacked/compose-carry "$HOME/.local/bin/compose-carry"
+"$HOME/.local/bin/compose-carry" --version
+```
+
+Require an `OK` for the archive you downloaded; do not proceed on an error or if nothing was checked. Add `$HOME/.local/bin` to your shell PATH if needed. No root privileges are required.
+
+On Windows, compare the hash to the matching filename in `SHA256SUMS` before extraction:
+
+```powershell
+Get-FileHash .\compose-carry_VERSION_windows_amd64.zip -Algorithm SHA256
+Get-Content .\SHA256SUMS
+Expand-Archive .\compose-carry_VERSION_windows_amd64.zip -DestinationPath .\unpacked
+New-Item -ItemType Directory -Force "$HOME\AppData\Local\Programs\compose-carry"
+Copy-Item .\unpacked\compose-carry.exe "$HOME\AppData\Local\Programs\compose-carry\compose-carry.exe"
+& "$HOME\AppData\Local\Programs\compose-carry\compose-carry.exe" --version
+```
+
+Add that installation directory to your user PATH using Windows environment settings if desired. Package version and commit are printed by `--version`. Checksums detect corrupted downloads; they are not signatures and do not establish publisher identity.
+
+To upgrade, close the executable, keep a copy of the old binary, verify the new package, and replace only the installed executable (PowerShell may require `Copy-Item -Force`). To uninstall, delete the installed executable and remove any PATH entry you added. Your snapshots and configuration are separate and are not deleted.
+
 ## Build
 
 Requires Go 1.24 or later. From the repository root:
@@ -173,6 +211,19 @@ COMPOSE_CARRY_TEST_RESOURCES=1 go test ./cmd/compose-carry -run TestDockerResour
 ```
 
 The resource integration test is opt-in, not enabled by the default CI workflow. Unit tests cover failed queries, ambiguity, output limits and deadlines without a daemon.
+
+## Packaging and release review
+
+From a clean committed checkout, with Go and Git on PATH:
+
+```sh
+go run ./cmd/package-release --out dist
+COMPOSE_CARRY_RELEASE_DIR=../../dist go test ./cmd/package-release -run TestReleaseArtifacts -count=1 -v
+```
+
+`dist` must not exist. The packager produces three archives and a separate `SHA256SUMS`, with only the executable, license and two READMEs in each archive. `internal/buildinfo/version.go` is the single version source; `--version vX.Y.Z` must match it. Source builds show `commit dev`, while packaged binaries embed the actual commit. Archives have fixed metadata/order; byte reproducibility across different Go versions is not promised.
+
+The tag-triggered release workflow accepts only `vMAJOR.MINOR.PATCH` matching the source version, waits for the Linux/Windows test workflow, and creates a **draft** release. No tag is pushed automatically. An existing release is never overwritten; review notes and assets before manually publishing. CI exercises package hashes/contents and the native Windows/Linux amd64 executables, but does not run ARM64 binaries.
 
 ## Direction
 

@@ -1,0 +1,52 @@
+name: release-draft
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/test.yml
+  publish-draft:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: stable
+          cache: false
+      - name: Validate tag and package tested source
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          go run ./cmd/package-release --version "$RELEASE_TAG" --out dist
+          COMPOSE_CARRY_RELEASE_DIR=../../dist go test ./cmd/package-release -run TestReleaseArtifacts -count=1
+      - name: Create draft for manual review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            printf '%s\n' 'A release already exists; refusing to replace its assets.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS \
+            --verify-tag --draft --title "compose-carry $RELEASE_TAG" \
+            --notes 'Draft: review the packages and add release notes before publishing. Verify SHA256SUMS before extracting. Linux supports path scanning; Windows supports offline comparison and Docker resource queries. Checks do not guarantee migration readiness. Built with AI assistance.'

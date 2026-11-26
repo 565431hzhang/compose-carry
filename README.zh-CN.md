@@ -8,6 +8,44 @@
 
 v0.4 是早期命令行版本：Linux 主机路径扫描、跨平台离线比较，以及可选的 Docker CLI 外部资源检查；只有 resources 命令需要 Docker CLI 访问 daemon。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
 
+## 安装发行包
+
+二进制包须在发行草稿审核后公开。如果 [Releases 页面](https://github.com/565431hzhang/compose-carry/releases) 尚无公开附件，请使用下方源码构建；GitHub 自动生成的源码压缩包不是可执行程序。
+
+| 系统 | 包名后缀 | 支持范围 |
+| --- | --- | --- |
+| Linux x86-64 | `linux_amd64.tar.gz` | 全部命令 |
+| Linux ARM64 | `linux_arm64.tar.gz` | 全部命令；仅交叉编译，尚未硬件实测 |
+| Windows x86-64 | `windows_amd64.zip` | 离线比较和 Docker 资源查询，不支持路径扫描 |
+
+从同一发行版本下载所需压缩包与 `SHA256SUMS`，放到新的空目录。Linux 先校验再解压（将 VERSION、ARCH 换成实际版本、架构）：
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+mkdir unpacked
+tar -xzf compose-carry_VERSION_linux_ARCH.tar.gz -C unpacked
+mkdir -p "$HOME/.local/bin"
+install -m 0755 unpacked/compose-carry "$HOME/.local/bin/compose-carry"
+"$HOME/.local/bin/compose-carry" --version
+```
+
+必须看到所下载包的 `OK`；报错或没有检查任何包都不能继续。需要时将 `$HOME/.local/bin` 加入 shell PATH，无需 root。
+
+Windows 对照 `SHA256SUMS` 中相同文件名的哈希，完全一致后再解压安装：
+
+```powershell
+Get-FileHash .\compose-carry_VERSION_windows_amd64.zip -Algorithm SHA256
+Get-Content .\SHA256SUMS
+Expand-Archive .\compose-carry_VERSION_windows_amd64.zip -DestinationPath .\unpacked
+New-Item -ItemType Directory -Force "$HOME\AppData\Local\Programs\compose-carry"
+Copy-Item .\unpacked\compose-carry.exe "$HOME\AppData\Local\Programs\compose-carry\compose-carry.exe"
+& "$HOME\AppData\Local\Programs\compose-carry\compose-carry.exe" --version
+```
+
+可在 Windows 环境设置中将安装目录加入用户 PATH。`--version` 显示版本与提交号；校验和用于检查下载损坏，不等同于数字签名或发布者身份认证。
+
+升级时关闭程序、保留旧可执行文件备份，校验新包后只替换已安装程序（PowerShell 可能需要 `Copy-Item -Force`）。卸载只删除已安装程序及自己添加的 PATH 项；不会删除快照或配置。
+
 ## 构建
 
 需要 Go 1.24 或更新版本，在仓库根目录执行：
@@ -172,6 +210,19 @@ COMPOSE_CARRY_TEST_RESOURCES=1 go test ./cmd/compose-carry -run TestDockerResour
 ```
 
 资源集成测试为显式启用，默认 CI 不创建 Docker 资源；无 daemon 单元测试覆盖查询失败、歧义、输出上限和截止时间。
+
+## 打包与发行审核
+
+在已提交、无未提交改动的仓库根目录执行，Go 和 Git 须在 PATH 中：
+
+```sh
+go run ./cmd/package-release --out dist
+COMPOSE_CARRY_RELEASE_DIR=../../dist go test ./cmd/package-release -run TestReleaseArtifacts -count=1 -v
+```
+
+`dist` 必须不存在。生成三个压缩包与独立的 `SHA256SUMS`，每包仅含程序、许可证和两份 README。版本单源为 `internal/buildinfo/version.go`，传入 `--version vX.Y.Z` 时必须一致。源码构建显示 `commit dev`，发行包嵌入实际提交号。压缩包元数据和顺序固定，但不承诺不同 Go 版本间逐字节可重复。
+
+标签发行工作流只接受与源码版本一致的 `vMAJOR.MINOR.PATCH`，等待 Linux/Windows 测试通过后创建**草稿**。不会自动推送标签或覆盖已有发行；人工检查说明和附件后再公开。CI 核对包内容、哈希和原生 Windows/Linux amd64 程序，不执行 ARM64 二进制。
 
 ## 后续方向
 

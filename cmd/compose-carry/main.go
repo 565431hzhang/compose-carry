@@ -7,10 +7,11 @@ import (
 	"io"
 	"os"
 
+	"github.com/565431hzhang/compose-carry/internal/buildinfo"
 	"github.com/565431hzhang/compose-carry/internal/carry"
 )
 
-const usage = `compose-carry v0.4.0 — read-only host-path checks before a Compose move
+const usage = `compose-carry ` + buildinfo.Version + ` — read-only host-path checks before a Compose move
 
   compose-carry source --config compose.json --out source.json
   compose-carry target --manifest source.json [--path-map paths.json] --out target.json
@@ -64,7 +65,9 @@ func run(args []string, out, errOut io.Writer) int {
 		return 0
 	}
 	if args[0] == "--version" {
-		fmt.Fprintln(out, "compose-carry v0.4.0")
+		if _, err := fmt.Fprintf(out, "compose-carry %s (commit %s)\n", buildinfo.Version, buildinfo.Commit); err != nil {
+			return fail(fmt.Errorf("cannot write version"))
+		}
 		return 0
 	}
 	if args[0] == "resources" {

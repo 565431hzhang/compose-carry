@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -33,6 +34,12 @@ jobs:
         run: |
           GOOS=linux GOARCH=amd64 go build ./...
           GOOS=linux GOARCH=arm64 go build ./...
+      - name: Build installable packages
+        run: go run ./cmd/package-release --out dist
+      - name: Verify package contents, checksums and native binary
+        env:
+          COMPOSE_CARRY_RELEASE_DIR: ../../dist
+        run: go test -count=1 ./cmd/package-release -run TestReleaseArtifacts -v
   windows:
     runs-on: windows-latest
     timeout-minutes: 10
@@ -44,3 +51,9 @@ jobs:
           cache: false
       - run: go test -count=1 ./...
       - run: go vet ./...
+      - name: Build installable packages
+        run: go run ./cmd/package-release --out dist
+      - name: Verify package contents, checksums and native binary
+        env:
+          COMPOSE_CARRY_RELEASE_DIR: ../../dist
+        run: go test -count=1 ./cmd/package-release -run TestReleaseArtifacts -v
