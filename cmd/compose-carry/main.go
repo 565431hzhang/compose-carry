@@ -10,12 +10,15 @@ import (
 	"github.com/565431hzhang/compose-carry/internal/carry"
 )
 
-const usage = `compose-carry v0.3.0 — read-only host-path checks before a Compose move
+const usage = `compose-carry v0.4.0 — read-only host-path checks before a Compose move
 
   compose-carry source --config compose.json --out source.json
   compose-carry target --manifest source.json [--path-map paths.json] --out target.json
   compose-carry compare --source source.json --target target.json --format text|json
     [--only-problems] [--fail-on-excluded]
+  compose-carry resources --config compose.json --docker-context NAME [--format text|json]
+
+Resources queries Docker (possibly remote) for external volume/network existence only.
 
 Compare options: --only-problems hides matched entries, not exclusions.
 --fail-on-excluded returns 1 for recorded exclusions, not uninventoried resources.
@@ -61,8 +64,11 @@ func run(args []string, out, errOut io.Writer) int {
 		return 0
 	}
 	if args[0] == "--version" {
-		fmt.Fprintln(out, "compose-carry v0.3.0")
+		fmt.Fprintln(out, "compose-carry v0.4.0")
 		return 0
+	}
+	if args[0] == "resources" {
+		return runResources(args[1:], out, errOut, queryDocker)
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(io.Discard)

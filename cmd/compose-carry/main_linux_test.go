@@ -74,6 +74,40 @@ volumes:
 	if strings.Contains(string(encoded), "private-") {
 		t.Fatal("snapshot retained configuration content")
 	}
+	external := `name: carry-resource-export
+services:
+  app:
+    image: busybox:latest
+    volumes:
+      - data:/data
+  isolated:
+    image: busybox:latest
+    network_mode: none
+volumes:
+  data:
+    external: true
+    name: carry-export-data
+networks:
+  default:
+    external: true
+    name: carry-export-edge
+`
+	if err := os.WriteFile(input, []byte(external), 0600); err != nil {
+		t.Fatal(err)
+	}
+	data, err = exec.Command("docker", "compose", "-f", input, "config", "--format", "json").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := carry.ParseResources(data)
+	if err != nil || len(resources) != 2 {
+		t.Fatal(resources, err)
+	}
+	for _, r := range resources {
+		if len(r.References) != 1 || r.References[0].Service != "app" {
+			t.Fatal(resources)
+		}
+	}
 }
 
 func TestBinaryEndToEnd(t *testing.T) {

@@ -6,7 +6,7 @@
 
 把 Compose 文件复制过去，不代表宿主机上的配置文件、密钥文件和挂载目录也齐全。本工具对照源机快照，报告目标机的路径缺失、类型不符与未验证项。
 
-v0.3 是早期命令行版本：Linux 主机扫描、跨平台离线比较、无运行时第三方依赖。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
+v0.4 是早期命令行版本：Linux 主机路径扫描、跨平台离线比较，以及可选的 Docker CLI 外部资源检查；只有 resources 命令需要 Docker CLI 访问 daemon。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
 
 ## 构建
 
@@ -23,7 +23,7 @@ go build -o compose-carry ./cmd/compose-carry
 GOOS=linux GOARCH=amd64 go build -o compose-carry ./cmd/compose-carry
 ```
 
-ARM64 主机改用 `GOARCH=arm64`。扫描必须直接在 Docker daemon 所在的 Linux 主机及相应文件系统命名空间中执行；不能在普通容器里或仅通过远程 Docker context 的客户端检查。Windows/macOS 只能做离线比较。
+ARM64 主机改用 `GOARCH=arm64`。扫描必须直接在 Docker daemon 所在的 Linux 主机及相应文件系统命名空间中执行；不能在普通容器里或仅通过远程 Docker context 的客户端检查。Windows/macOS 不支持路径扫描，可离线比较；resources 则依赖可用的 Docker CLI/context，不依赖本地 Linux 路径访问。
 
 ## 使用流程
 
@@ -47,7 +47,7 @@ docker compose config --format json > compose.json
 ./compose-carry target --manifest source.json --out target.json
 ```
 
-工具不连接 SSH、不复制数据、不创建缺失路径、不部署服务。只写命令明确指定的快照文件；已有输出一律拒绝覆盖。
+路径流程不连接 SSH、不复制数据、不创建缺失路径、不部署服务。只写命令明确指定的快照文件；已有输出一律拒绝覆盖。
 
 ### 3. 离线比较
 
@@ -106,7 +106,23 @@ JSON 成功写出时，`exit_code` 与进程退出码一致；输出故障仍返
 
 不传映射仍生成 v1 快照；传入映射（包括 `{}`）生成仅用于 target 的 v2 快照，每项必须记录 `target_path`（排除项为空）。未映射的非法路径保留为未验证，不自动规范化。新版能比较原有 v1 快照，v0.1 会拒绝 v2；映射检查和比较都应使用新版程序。映射文件也有敏感路径元数据，受 16 MiB 输入限制。
 
-## 核对范围
+## 外部 Docker 卷与网络
+
+```sh
+./compose-carry resources --config compose.json --docker-context destination --format json
+```
+
+必须显式选择已有 Docker context（允许 `default`）。查询子进程会移除 DOCKER_HOST、DOCKER_CONTEXT、DOCKER_TLS、DOCKER_TLS_VERIFY、DOCKER_CERT_PATH 端点覆盖变量，保留 context 存储和凭据，不修改系统环境。这是独立命令：读取已渲染的 Compose JSON，通过 Docker CLI 查询该 context 的 daemon，可能访问远程主机；不读取或修改路径快照、不合并报告、不传输配置，也不证明所选 daemon 与路径扫描主机一致。渲染配置仍可能含密码，不要为了该命令随意传输或公开它。
+
+仅检查服务实际引用的 `external: true` 命名卷和网络。顶层 `name` 优先于逻辑键，不添加项目名前缀；按资源种类和名称合并重复引用，保留服务/逻辑键关联。隐式外部 default 网络会纳入，但 `network_mode` 服务不添加默认网络。普通 Compose 管理资源、匿名卷、未引用定义不检查；输入须使用布尔 external 的渲染 JSON，不支持旧式 external 对象。
+
+每个需要的类别只执行一次只读清单查询，只投影卷名及网络名/完整 ID。卷按完整名称匹配；网络支持名称、完整 ID 或唯一 ID 前缀。重名或名称/ID 冲突保守标为 `unverified`，不猜 Docker 解析优先级。含 `$` 或控制字符的名称保留为未验证。
+
+结果为 `present`、`missing`、`unverified`，附汇总与原因码。只有成功解析的清单里没有候选才算缺失；CLI 不存在、查询失败、超时、输出超限或格式错误不能算缺失。每类查询15秒截止、stdout 上限16 MiB、退出后管道等待上限1秒，原始 stderr 不回显；报告只包含被引用资源，不泄露无关清单。
+
+退出码：至少一项且全部存在为 `0`，缺失/未验证/无项为 `1`，参数、输入或报告写入错误为 `2`；无项时不调用 Docker。存在不代表卷内容、驱动、子网、连接性、权限或应用可用。Docker context 及传输助手由用户管理，须可信；该命令不会启动容器或修改 Docker 资源。
+
+## 路径流程核对范围
 
 - Compose 渲染后的长语法 bind mount；预期文件/目录类型来自源机实际元数据，不靠后缀猜测。
 - 服务实际引用的文件型 configs/secrets，要求普通文件；不检查未引用定义。
@@ -117,7 +133,7 @@ JSON 成功写出时，`exit_code` 与进程退出码一致；输出故障仍返
 
 路径含 `$` 或反斜杠时，即使是合法字面字符，也保守标为未验证；需要规范化的路径同样不扫描。本工具不替代完整 Compose schema 校验，请输入 Compose 导出的有效 JSON，而不是原始 YAML 或手写短语法。
 
-## 退出码
+## 路径流程退出码
 
 - `0`：至少有一项范围内依赖，范围内全部检查成功（target/compare 还要求类型匹配）。
 - `1`：有缺口、类型不符、未验证项、没有可检查路径，或 compare 指定 `--fail-on-excluded` 时存在已记录排除项。
@@ -127,7 +143,7 @@ JSON 成功写出时，`exit_code` 与进程退出码一致；输出故障仍返
 
 ## 隐私与限制
 
-- 不联网、不递归目录、不读取依赖文件内容、不修改被扫描路径。Linux 使用只获取元数据的文件句柄，逐级拒绝符号链接。
+- 路径流程不联网、不递归目录、不读取依赖文件内容、不修改被扫描路径；resources 则显式查询 Docker。Linux 使用只获取元数据的文件句柄，逐级拒绝符号链接。
 - 必须读取用户明确指定的配置和快照输入，单个输入及生成快照上限均为 16 MiB，超大快照在创建输出前拒绝。Linux 输出快照权限为 `0600`；终端输出或重定向报告的权限由 shell 决定。
 - 路径、服务名称和引用仍可能敏感，不要公开真实快照；没有通用脱敏和签名功能。
 - 快照只是一个时间点的观察，不证明主机身份、时效或真实性。依赖 ID 用于发现不一致，不防范协调篡改；依赖与源证据完全一致的不同主机快照仍可兼容，用户须选对文件。
@@ -149,9 +165,17 @@ COMPOSE_CARRY_TEST_COMPOSE=1 go test ./cmd/compose-carry -run TestComposeExport 
 
 只运行 `docker compose config`，不启动容器或拉镜像。CI 在非 root Linux 上执行扫描、Compose 导出集成测试及 amd64/arm64 编译；Windows 测试覆盖离线比较和拒绝扫描。
 
+显式在可用于测试的 Docker daemon 上验收资源检查：测试会创建唯一命名的空卷和内部网络，按记录的名称/ID 删除并确认清理，不启动容器。
+
+```sh
+COMPOSE_CARRY_TEST_RESOURCES=1 go test ./cmd/compose-carry -run TestDockerResourcesIntegration -v
+```
+
+资源集成测试为显式启用，默认 CI 不创建 Docker 资源；无 daemon 单元测试覆盖查询失败、歧义、输出上限和截止时间。
+
 ## 后续方向
 
-显式路径映射已实现；后续按实际搬迁案例增加外部卷/网络元数据，以及边界明确的权限诊断，不扩张成部署平台。
+显式路径映射和外部资源存在性检查已实现；后续按实际搬迁案例增加更丰富的资源元数据，以及边界明确的权限诊断，不扩张成部署平台。
 
 [Troubleshoot](https://github.com/replicatedhq/troubleshoot)、[DCLint](https://github.com/zavoloklom/docker-compose-linter)、[Compose Volume Check](https://github.com/Profen-BLF/compose-volume-check) 已解决相邻问题；本项目聚焦源机依赖与目标机实际路径的核对，不宣称首创或替代这些项目。
 

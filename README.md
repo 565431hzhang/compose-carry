@@ -6,7 +6,7 @@
 
 `compose-carry` compares the source host's bind mounts and file-backed configs/secrets with paths on the destination host. It answers a small question: **which listed paths are missing, have the wrong type, or could not be checked?**
 
-It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.3 is an early CLI: Linux host scanning, portable offline comparison, no runtime dependencies outside the operating system. Docker Compose is needed only to export your configuration.
+It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.4 is an early CLI: Linux host-path scanning, portable offline comparison, and an optional Docker CLI-based external resource check. Docker Compose exports your configuration; only `resources` requires Docker CLI access to a daemon.
 
 ## Build
 
@@ -23,7 +23,7 @@ For a Linux host from another platform:
 GOOS=linux GOARCH=amd64 go build -o compose-carry ./cmd/compose-carry
 ```
 
-Use `GOARCH=arm64` for a Linux ARM64 host. Run the scanner directly on the Docker daemon's host, in the filesystem namespace containing its mounts, not in an ordinary container or on a client pointing at a remote daemon. Scanning on Windows/macOS is rejected; offline `compare` works there.
+Use `GOARCH=arm64` for a Linux ARM64 host. Run the scanner directly on the Docker daemon's host, in the filesystem namespace containing its mounts, not in an ordinary container or on a client pointing at a remote daemon. Scanning on Windows/macOS is rejected; offline `compare` works there. `resources` requires a working Docker CLI/context rather than local Linux path access.
 
 ## Three-step workflow
 
@@ -47,7 +47,7 @@ Transfer only `source.json` and the appropriate binary using your own secure tra
 ./compose-carry target --manifest source.json --out target.json
 ```
 
-No SSH, data transfer, directory creation, deployment or application startup is performed by the tool. Snapshot output is explicitly created by the command, but existing output files are never overwritten.
+The path workflow performs no SSH, data transfer, directory creation, deployment or application startup. Snapshot output is explicitly created by the command, but existing output files are never overwritten.
 
 ### 3. Compare anywhere
 
@@ -105,7 +105,23 @@ Reports show `source_path` and `target_path` in text; JSON keeps the source in `
 
 No map means snapshot format v1. Supplying a map, even `{}`, creates a target-only v2 snapshot with `target_path` on every entry (empty for excluded entries). Unmapped invalid paths are retained as unverified, never silently normalized. This version reads v1 and v2; v0.1 rejects v2. Use the new binary for both mapped scanning and comparison. Mapping files contain sensitive path metadata and share the 16 MiB input limit.
 
-## What is checked
+## External Docker volumes and networks
+
+```sh
+./compose-carry resources --config compose.json --docker-context destination --format json
+```
+
+Use an existing, explicitly selected Docker context (`default` is allowed). Endpoint overrides (`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_TLS`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`) are removed only from the query subprocess environment; context storage and credentials are preserved. This separate command reads rendered Compose JSON and queries that context's daemon, which may be remote. It does not consume or change path snapshots, merge reports, transfer configuration, or verify that the selected daemon is the host used for path scanning. Keep the rendered input private; do not transfer a secret-containing configuration just to run this command.
+
+Only service-referenced `external: true` volumes and networks are checked. The top-level `name` overrides the logical key without a project prefix. Shared references are grouped by kind/name; the report retains service/key references. Implicit external `default` networks are included unless the service uses `network_mode`. Managed resources, anonymous volumes and unused definitions are ignored. Use rendered JSON with boolean `external`, not legacy object syntax.
+
+The tool requests projected volume names and network names/full IDs using read-only list commands, once per needed category. Volumes match exact names; networks match exact names, full IDs or unique ID prefixes. Duplicate names or name/ID conflicts are conservatively `unverified`, without guessing Docker's resolution priority. Names containing `$` or control characters remain unverified.
+
+Results are `present`, `missing`, or `unverified`, with summary counts and reason codes. Missing means absent from a successfully parsed list. Failed queries, missing Docker CLI, timeouts, oversized output or malformed inventories never mean missing. Each query has a 15-second deadline, a 16 MiB stdout cap and a one-second post-exit pipe wait limit; raw stderr is discarded. Only referenced resources are reported, not unrelated daemon inventory.
+
+Exit codes: `0` requires at least one resource and all present; `1` means missing, unverified or no resources; `2` means input/argument/report-write failure. No resources means no Docker call. Presence does not prove volume contents, driver/subnet compatibility, connectivity, permissions or application readiness. Docker contexts and their transport helpers are user-managed and must be trusted; no containers are started and no Docker resources are modified by this command.
+
+## What the path workflow checks
 
 - Long-form bind mounts from rendered Compose JSON; their expected type comes from the source host's metadata, not the path's extension.
 - Only service-referenced, file-backed `configs` and `secrets`; these must be regular files.
@@ -116,7 +132,7 @@ Named volumes, non-bind mounts, external/environment/inline config and secret so
 
 Paths containing `$` or backslashes are conservatively unverified even if those characters are literal. Relative paths and paths needing normalization are also unverified. This is not a full Compose schema validator; give it the effective JSON produced by Compose, not raw YAML or hand-authored shorthand.
 
-## Exit codes
+## Path workflow exit codes
 
 | Code | Meaning |
 | --- | --- |
@@ -128,7 +144,7 @@ A scan that exits `1` still writes a valid snapshot; use it for diagnosis and co
 
 ## Safety and limits
 
-- No network calls, dependency file-content reads, recursive directory walks, or modifications to scanned paths. Linux scanning uses metadata-only handles and rejects symlinks at every path component.
+- The path workflow makes no network calls, dependency file-content reads, recursive directory walks, or modifications to scanned paths; `resources` explicitly queries Docker. Linux scanning uses metadata-only handles and rejects symlinks at every path component.
 - Reads of the explicitly supplied Compose JSON and snapshot files are necessary. Inputs and generated snapshots are limited to 16 MiB; an oversized snapshot is rejected before creating an output file. Outputs use mode `0600` on Linux; stdout reports and redirected JSON inherit your shell's permissions.
 - Service names, references and absolute paths can still reveal sensitive metadata. Do not publish real snapshots. There is no general-purpose redaction or signing mechanism.
 - A snapshot is a point-in-time observation, not proof of identity, freshness or authenticity. IDs detect inconsistent metadata, not maliciously coordinated edits. Two snapshots with identical dependencies and source observations are compatible regardless of which hosts produced them; choose the right files.
@@ -150,9 +166,17 @@ COMPOSE_CARRY_TEST_COMPOSE=1 go test ./cmd/compose-carry -run TestComposeExport 
 
 That test invokes `docker compose config`, not `up`, and pulls no images. CI runs Linux tests as a non-root user, exercises a real Compose export, and cross-compiles amd64/arm64 binaries. Windows tests cover offline comparison and explicit scan rejection.
 
+To explicitly test against a disposable Docker daemon, the integration test creates uniquely named empty volumes and internal networks, removes them by recorded name/ID, and verifies cleanup. It never starts containers:
+
+```sh
+COMPOSE_CARRY_TEST_RESOURCES=1 go test ./cmd/compose-carry -run TestDockerResourcesIntegration -v
+```
+
+The resource integration test is opt-in, not enabled by the default CI workflow. Unit tests cover failed queries, ambiguity, output limits and deadlines without a daemon.
+
 ## Direction
 
-Keep the project focused on host dependency gaps. Potential next increments, guided by actual migration cases: external volume/network metadata and carefully scoped permission diagnostics. No deployment platform or automatic migration is planned.
+Keep the project focused on host dependency gaps. Potential next increments, guided by actual migration cases: richer external resource metadata and carefully scoped permission diagnostics. No deployment platform or automatic migration is planned.
 
 [Replicated Troubleshoot](https://github.com/replicatedhq/troubleshoot), [DCLint](https://github.com/zavoloklom/docker-compose-linter), and [Compose Volume Check](https://github.com/Profen-BLF/compose-volume-check) solve adjacent problems; this project concentrates on checking the destination host against a source-host path snapshot, rather than replacing those tools. No claim of being the first or only such tool is made.
 

@@ -1,0 +1,143 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/565431hzhang/compose-carry/internal/carry"
+)
+
+const resourcesUsage = `compose-carry resources --config compose.json --docker-context NAME [--format text|json]
+Checks referenced external volumes/networks through the selected Docker context.
+May contact a remote daemon. Does not verify contents, settings or application readiness.
+Exit: 0 at least one resource and all present; 1 missing/unverified/no resources; 2 input/output error.
+`
+
+type resourceRunner func(context.Context, ...string) ([]byte, error)
+
+type cappedOutput struct {
+	buffer   bytes.Buffer
+	limit    int
+	cancel   context.CancelFunc
+	exceeded bool
+}
+
+func (w *cappedOutput) Write(p []byte) (int, error) {
+	if len(p) > w.limit-w.buffer.Len() {
+		w.exceeded = true
+		w.cancel()
+		return 0, errors.New("output limit exceeded")
+	}
+	return w.buffer.Write(p)
+}
+
+func dockerEnvironment(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, item := range env {
+		key, _, _ := strings.Cut(item, "=")
+		switch strings.ToUpper(key) {
+		case "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH":
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+func boundedCommand(ctx context.Context, limit int, program string, args ...string) ([]byte, error) {
+	child, cancel := context.WithCancel(ctx)
+	defer cancel()
+	output := &cappedOutput{limit: limit, cancel: cancel}
+	cmd := exec.CommandContext(child, program, args...)
+	// Even --context default otherwise inherits DOCKER_HOST and TLS overrides.
+	cmd.Env = dockerEnvironment(os.Environ())
+	cmd.Stdout = output
+	cmd.Stderr = io.Discard
+	cmd.WaitDelay = time.Second
+	err := cmd.Run()
+	if err != nil || output.exceeded || child.Err() != nil {
+		return nil, errors.New("Docker query unavailable")
+	}
+	return output.buffer.Bytes(), nil
+}
+
+func queryDocker(ctx context.Context, args ...string) ([]byte, error) {
+	return boundedCommand(ctx, carry.MaxInputBytes, "docker", args...)
+}
+
+func runResources(args []string, out, errOut io.Writer, runner resourceRunner) int {
+	fail := func(message string) int { fmt.Fprintln(errOut, "error:", message); return 2 }
+	flags := flag.NewFlagSet("resources", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var config, dockerContext, format string
+	flags.StringVar(&config, "config", "", "rendered Compose JSON")
+	flags.StringVar(&dockerContext, "docker-context", "", "explicit Docker context")
+	flags.StringVar(&format, "format", "text", "text or json")
+	if err := flags.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			if _, err := io.WriteString(out, resourcesUsage); err != nil {
+				return fail("cannot write help")
+			}
+			return 0
+		}
+		return fail("invalid resources arguments; use resources --help")
+	}
+	if flags.NArg() != 0 || config == "" || dockerContext == "" || strings.TrimSpace(dockerContext) != dockerContext || strings.HasPrefix(dockerContext, "-") || strings.IndexFunc(dockerContext, unicode.IsControl) >= 0 || (format != "text" && format != "json") {
+		return fail("resources requires --config, an explicit --docker-context, and --format text|json")
+	}
+	data, err := carry.ReadInput(config)
+	if err != nil {
+		return fail(err.Error())
+	}
+	resources, err := carry.ParseResources(data)
+	if err != nil {
+		return fail(err.Error())
+	}
+	report := carry.CheckResources(resources, dockerContext, func(kind string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		args := []string{"--context", dockerContext, kind, "ls"}
+		if kind == "network" {
+			args = append(args, "--no-trunc", "--format", "[{{json .ID}},{{json .Name}}]")
+		} else {
+			args = append(args, "--format", "{{json .Name}}")
+		}
+		return runner(ctx, args...)
+	})
+	if format == "json" {
+		encoder := json.NewEncoder(out)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(report); err != nil {
+			return fail("cannot write resource report")
+		}
+	} else {
+		if _, err := fmt.Fprintf(out, "%s\nDocker context: %q\nSummary: present=%d missing=%d unverified=%d\n", report.Scope, report.DockerContext, report.Summary.Present, report.Summary.Missing, report.Summary.Unverified); err != nil {
+			return fail("cannot write resource report")
+		}
+		if len(report.Results) == 0 {
+			if _, err := fmt.Fprintln(out, "No referenced external volumes/networks to check; not a successful verification."); err != nil {
+				return fail("cannot write resource report")
+			}
+		}
+		for _, result := range report.Results {
+			refs, _ := json.Marshal(result.References)
+			if _, err := fmt.Fprintf(out, "%-10s kind=%s name=%q reason=%s references=%s\n", result.Status, result.Kind, result.Name, result.Reason, refs); err != nil {
+				return fail("cannot write resource report")
+			}
+		}
+		if _, err := fmt.Fprintf(out, "Resources: %d; exit: %d\n", len(report.Results), report.ExitCode); err != nil {
+			return fail("cannot write resource report")
+		}
+	}
+	return report.ExitCode
+}
