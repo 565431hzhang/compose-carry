@@ -6,7 +6,40 @@
 
 `compose-carry` compares the source host's bind mounts and file-backed configs/secrets with paths on the destination host. It answers a small question: **which listed paths are missing, have the wrong type, or could not be checked?**
 
-It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.5 is an early CLI: Linux host-path scanning, portable offline comparison, and an optional Docker CLI-based external resource check. Docker Compose exports your configuration; only `resources` requires Docker CLI access to a daemon.
+It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.6 is an early CLI: Linux host-path scanning, portable offline comparison, and an optional Docker CLI-based external resource check. Docker Compose exports your configuration; `resources` and the external-resource section of `check` require Docker CLI access to a daemon.
+
+## Quick start: one bundle, two commands (Linux)
+
+Requires v0.6 or a current source build; an older published binary does not include `export/check`. First prepare the effective Compose JSON **on the source host**, using your deployment's file/environment/profile options:
+
+```sh
+umask 077
+docker compose config --format json > compose.json
+```
+
+**Source host — export:**
+
+```sh
+./compose-carry export --config compose.json
+```
+
+This creates `carry.json` containing a source path snapshot and minimal external-resource manifest. Keep `compose.json` private on the source; transfer only `carry.json` and the appropriate binary yourself. Export does not query Docker, copy dependency file contents or perform migration. Successful export returns `0` even with source problems; its summary names unverified/excluded entries. Existing output is never overwritten; use `--out another.json` for another run.
+
+**Destination host — check:**
+
+```sh
+./compose-carry check --docker-context default
+```
+
+Run on the destination Linux host in the filesystem namespace containing its mounts. Use the intended Docker context rather than blindly copying `default`: a remote context is not necessarily this path-scanning host. If there are no external resources, just `./compose-carry check` suffices. With resources but no context, paths are still checked, resources stay `unverified/context_required`, and the command returns `1` without calling Docker.
+
+One report covers both sections; successful rows are hidden by default. No target snapshot file or separate compare step is needed. Use `--all` for all rows, `--format json` for automation, and `--bundle another.json` for another input. Existing `--path-map` and `--resource-map` files work when destination locations/names differ.
+
+Check returns `0` only with at least one in-scope path/resource and all scoped checks passing; gaps, unverified entries, or nothing to check return `1`; input/platform/output errors return `2`. An empty section does not fail a successful other section. `--fail-on-excluded` also fails on path exclusions, even when an overlapping external resource is present: existence does not validate what was excluded from path checks.
+
+The bundle is a strict versioned JSON file, capped at **16 MiB total**, with private `0600` output on Linux. Names/paths may still be sensitive; validation is not authentication or proof of completeness. `check` never modifies the bundle. JSON has one top-level `exit_code`, full per-section summaries and explicit `only_problems`/`fail_on_excluded` flags; filtered results are arrays, not complete inventories. The two sections may overlap, so do not add their counts as unique dependencies.
+
+Both new commands require Linux. Existing commands below remain available for advanced workflows and cross-platform offline comparison. No SSH, deployment, automatic transfer or repair is performed.
 
 ## Install a packaged binary
 
@@ -63,7 +96,7 @@ GOOS=linux GOARCH=amd64 go build -o compose-carry ./cmd/compose-carry
 
 Use `GOARCH=arm64` for a Linux ARM64 host. Run the scanner directly on the Docker daemon's host, in the filesystem namespace containing its mounts, not in an ordinary container or on a client pointing at a remote daemon. Scanning on Windows/macOS is rejected; offline `compare` works there. `resources` requires a working Docker CLI/context rather than local Linux path access.
 
-## Three-step workflow
+## Advanced: separate path snapshots and comparison
 
 ### 1. Source host
 
@@ -117,7 +150,7 @@ Every comparison includes a full `summary` with six counts: `matched`, `target_m
 
 `--only-problems` hides only matched result rows, retaining exclusions. It never changes the full summary, counts or exit decision. JSON explicitly includes `only_problems` and `fail_on_excluded`; a filtered empty `results` is `[]`, not a claim that nothing was checked. Text shows the full summary before rows and the number shown.
 
-`--fail-on-excluded` returns `1` when any **recorded** excluded entry exists, even when all in-scope paths match. Default behavior remains unchanged. Both options apply only to `compare`; snapshot formats v1/v2 and source/target behavior are unchanged. Networks and other uninventoried resources remain unchecked even with this option: this is not a complete migration gate.
+`--fail-on-excluded` returns `1` when any **recorded** excluded entry exists, even when all in-scope paths match. Default behavior remains unchanged. These comparison options do not change source/target behavior or snapshot formats v1/v2; unified `check` uses `--all` for display and also supports `--fail-on-excluded`. Networks and other uninventoried resources remain unchecked even with this option: this is not a complete migration gate.
 
 For successfully written JSON, `exit_code` equals the process exit code. An output failure returns `2`; any partial report must be discarded.
 
@@ -238,7 +271,7 @@ A scan that exits `1` still writes a valid snapshot; use it for diagnosis and co
 
 ## Safety and limits
 
-- The path workflow makes no network calls, dependency file-content reads, recursive directory walks, or modifications to scanned paths; `resources` explicitly queries Docker. Linux scanning uses metadata-only handles and rejects symlinks at every path component.
+- The path workflow makes no network calls, dependency file-content reads, recursive directory walks, or modifications to scanned paths; `resources` and `check` with an explicit context query Docker. Linux scanning uses metadata-only handles and rejects symlinks at every path component.
 - Reads of the explicitly supplied Compose JSON and snapshot files are necessary. Inputs and generated snapshots are limited to 16 MiB; an oversized snapshot is rejected before creating an output file. Outputs use mode `0600` on Linux; stdout reports and redirected JSON inherit your shell's permissions.
 - Service names, references and absolute paths can still reveal sensitive metadata. Do not publish real snapshots. There is no general-purpose redaction or signing mechanism.
 - A snapshot is a point-in-time observation, not proof of identity, freshness or authenticity. IDs detect inconsistent metadata, not maliciously coordinated edits. Two snapshots with identical dependencies and source observations are compatible regardless of which hosts produced them; choose the right files.
@@ -272,7 +305,7 @@ The resource integration test is opt-in locally and explicitly enabled on dispos
 
 Two source jobs run concurrently on standard `ubuntu-24.04` and `ubuntu-24.04-arm`. Each runs two independent privileged DinD containers: source and destination. The scanner executes inside the corresponding filesystem namespace as UID 1000 with zero effective capabilities; only daemon setup is privileged. Tests cover missing/type-mismatched paths, repairs, mapping, symlinks, permission denial and independent external resources. No host Docker socket is mounted and no daemon TCP port is published.
 
-Two destination jobs then run concurrently, checking AMD64 source path snapshots and exported resource manifests on native ARM64 and the reverse. Resource tests transfer only the manifest, detect missing resources, then check explicitly renamed destination volumes/networks without copying the source Compose configuration. Only small synthetic snapshots/manifests, bounded together to 16 KiB after base64 encoding, cross jobs through outputs; missing/mismatched outputs fail the test. No QEMU or external relay is used. These are container-isolated environments, not two physical servers.
+Two destination jobs then run concurrently, checking an actual AMD64-generated export bundle on native ARM64 and the reverse. Each bundle includes the source path snapshot and minimal resource manifest; tests cover missing resources, context-required diagnostics, repairs, both maps and strict exclusions without copying the source Compose configuration or writing a target snapshot. Only a small synthetic bundle, bounded with its envelope to 16 KiB after base64 encoding, crosses jobs through outputs; missing/mismatched outputs fail the test. No QEMU or external relay is used. These are container-isolated environments, not two physical servers.
 
 All jobs require a public repository and use standard runners. Linux jobs stop after 25 minutes, Windows after 10. Setup caches are disabled; no Actions artifacts or persistent build caches are uploaded. Packages exist only temporarily on the runner and are removed after tests. DinD containers and their anonymous volumes are removed on normal/failure exits with an always-run fallback; GitHub disposes of the runner after hard cancellation. Explicit tag-triggered Release attachments are separate from test artifacts. Free execution relies on GitHub's public-repository standard-runner policy; these safeguards do not control other account workflows or charges.
 

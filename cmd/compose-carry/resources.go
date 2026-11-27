@@ -95,6 +95,24 @@ func queryDocker(ctx context.Context, args ...string) ([]byte, error) {
 	return boundedCommand(ctx, carry.MaxInputBytes, "docker", args...)
 }
 
+func validDockerContext(name string) bool {
+	return name != "" && strings.TrimSpace(name) == name && !strings.HasPrefix(name, "-") && strings.IndexFunc(name, unicode.IsControl) < 0
+}
+
+func resourceQuery(name string, runner resourceRunner) func(string) ([]byte, error) {
+	return func(kind string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		args := []string{"--context", name, kind, "ls"}
+		if kind == "network" {
+			args = append(args, "--no-trunc", "--format", "[{{json .ID}},{{json .Name}}]")
+		} else {
+			args = append(args, "--format", "{{json .Name}}")
+		}
+		return runner(ctx, args...)
+	}
+}
+
 func runResources(args []string, out, errOut io.Writer, runner resourceRunner) int {
 	fail := func(message string) int { fmt.Fprintln(errOut, "error:", message); return 2 }
 	flags := flag.NewFlagSet("resources", flag.ContinueOnError)
@@ -114,7 +132,7 @@ func runResources(args []string, out, errOut io.Writer, runner resourceRunner) i
 		}
 		return fail("invalid resources arguments; use resources --help")
 	}
-	if flags.NArg() != 0 || (config == "") == (manifest == "") || dockerContext == "" || strings.TrimSpace(dockerContext) != dockerContext || strings.HasPrefix(dockerContext, "-") || strings.IndexFunc(dockerContext, unicode.IsControl) >= 0 || (format != "text" && format != "json") {
+	if flags.NArg() != 0 || (config == "") == (manifest == "") || !validDockerContext(dockerContext) || (format != "text" && format != "json") {
 		return fail("resources requires exactly one of --config or --manifest, an explicit --docker-context, and --format text|json")
 	}
 	input := config
@@ -147,17 +165,7 @@ func runResources(args []string, out, errOut io.Writer, runner resourceRunner) i
 			return fail(err.Error())
 		}
 	}
-	report, err := carry.CheckResourcesWithMap(resources, dockerContext, mapping, func(kind string) ([]byte, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		args := []string{"--context", dockerContext, kind, "ls"}
-		if kind == "network" {
-			args = append(args, "--no-trunc", "--format", "[{{json .ID}},{{json .Name}}]")
-		} else {
-			args = append(args, "--format", "{{json .Name}}")
-		}
-		return runner(ctx, args...)
-	})
+	report, err := carry.CheckResourcesWithMap(resources, dockerContext, mapping, resourceQuery(dockerContext, runner))
 	if err != nil {
 		return fail(err.Error())
 	}

@@ -13,6 +13,12 @@ import (
 
 const usage = `compose-carry ` + buildinfo.Version + ` — read-only host-path checks before a Compose move
 
+Recommended (Linux; prepare Compose JSON first):
+  compose-carry export --config compose.json
+  compose-carry check [--docker-context NAME] [--all]
+  Transfer the default carry.json between hosts yourself.
+
+Advanced commands:
   compose-carry source --config compose.json --out source.json
   compose-carry target --manifest source.json [--path-map paths.json] --out target.json
   compose-carry compare --source source.json --target target.json --format text|json
@@ -71,6 +77,9 @@ func run(args []string, out, errOut io.Writer) int {
 			return fail(fmt.Errorf("cannot write version"))
 		}
 		return 0
+	}
+	if args[0] == "export" || args[0] == "check" {
+		return runBundle(args[0], args[1:], out, errOut, queryDocker)
 	}
 	if args[0] == "resource-manifest" {
 		return runResourceManifest(args[1:], out, errOut)

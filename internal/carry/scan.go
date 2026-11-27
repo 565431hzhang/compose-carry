@@ -61,22 +61,8 @@ func TargetWithPaths(source Snapshot, paths map[string]string) (Snapshot, error)
 	if runtime.GOOS != "linux" {
 		return Snapshot{}, errors.New("host scanning requires Linux; offline compare works on other platforms")
 	}
-	if err := source.Validate(); err != nil {
+	if err := ValidatePathMap(source, paths); err != nil {
 		return Snapshot{}, err
-	}
-	if source.Phase != "source" {
-		return Snapshot{}, errors.New("target requires a source snapshot")
-	}
-	known := map[string]bool{}
-	for _, e := range source.Entries {
-		if e.Dependency.Kind != "excluded" {
-			known[e.Dependency.Path] = true
-		}
-	}
-	for from, to := range paths {
-		if !known[from] || !validPath(from) || !validPath(to) {
-			return Snapshot{}, errors.New("path map contains an unknown source or invalid path")
-		}
 	}
 	target := Snapshot{Version: Version, Phase: "target", Entries: make([]Entry, len(source.Entries))}
 	if paths != nil {
@@ -95,6 +81,27 @@ func TargetWithPaths(source Snapshot, paths map[string]string) (Snapshot, error)
 		target.Entries[i] = e
 	}
 	return target, target.Validate()
+}
+
+func ValidatePathMap(source Snapshot, paths map[string]string) error {
+	if err := source.Validate(); err != nil {
+		return err
+	}
+	if source.Phase != "source" {
+		return errors.New("target requires a source snapshot")
+	}
+	known := map[string]bool{}
+	for _, e := range source.Entries {
+		if e.Dependency.Kind != "excluded" {
+			known[e.Dependency.Path] = true
+		}
+	}
+	for from, to := range paths {
+		if !known[from] || !validPath(from) || !validPath(to) {
+			return errors.New("path map contains an unknown source or invalid path")
+		}
+	}
+	return nil
 }
 
 func SnapshotExitCode(s Snapshot) int {

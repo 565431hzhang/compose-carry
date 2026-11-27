@@ -65,89 +65,67 @@ class Servers:
 
     def source(self, name):
         self.shell(name, 'mkdir /carry/data /carry/locked; touch /carry/config /carry/locked/file; chmod 700 /carry/locked; chown 1000:1000 /carry/data /carry/config')
-        config = {'name': 'carry-ci', 'services': {'app': {'image': 'busybox:latest', 'volumes': [
+        config = {'name': 'carry-ci', 'services': {'app': {'image': 'busybox:latest',
+            'environment': {'PASSWORD': 'private-ci-not-exported'}, 'volumes': [
             {'type': 'bind', 'source': '/carry/data', 'target': '/data'},
-            {'type': 'bind', 'source': '/carry/locked/file', 'target': '/locked'}], 'configs': ['settings']}},
-            'configs': {'settings': {'file': '/carry/config'}}}
+            {'type': 'bind', 'source': '/carry/locked/file', 'target': '/locked'},
+            {'type': 'volume', 'source': 'external', 'target': '/external'}],
+            'configs': ['settings'], 'networks': ['edge']}},
+            'configs': {'settings': {'file': '/carry/config'}},
+            'volumes': {'external': {'external': True, 'name': 'carry-ci-volume'}},
+            'networks': {'edge': {'external': True, 'name': 'carry-ci-network'}}}
         self.put(name, 'compose.json', json.dumps(config).encode())
         rendered = self.execute(name, ['docker', 'compose', '-f', '/carry/compose.json', 'config', '--format', 'json'])
         self.put(name, 'rendered.json', rendered)
-        self.execute(name, ['compose-carry', 'source', '--config', '/carry/rendered.json', '--out', '/carry/source.json'], expected=1)
-        full = json.loads(self.get(name, 'source.json'))
-        locked = [e for e in full['entries'] if e['dependency']['path'] == '/carry/locked/file']
+        summary = self.execute(name, ['compose-carry', 'export', '--config', '/carry/rendered.json', '--out', '/carry/locked.json'])
+        assert b'source_unverified=1' in summary
+        full = json.loads(self.get(name, 'locked.json'))
+        locked = [e for e in full['paths']['entries'] if e['dependency']['path'] == '/carry/locked/file']
         assert len(locked) == 1 and locked[0]['source']['state'] == 'permission_denied'
-        # Export a separate fully verified source snapshot for cross-host checks.
-        config['services']['app']['volumes'] = config['services']['app']['volumes'][:1]
+        config['services']['app']['volumes'].pop(1)
         self.put(name, 'compose-clean.json', json.dumps(config).encode())
         rendered = self.execute(name, ['docker', 'compose', '-f', '/carry/compose-clean.json', 'config', '--format', 'json'])
         self.put(name, 'clean.json', rendered)
-        self.execute(name, ['compose-carry', 'source', '--config', '/carry/clean.json', '--out', '/carry/export.json'])
-        snapshot = self.get(name, 'export.json')
-        assert len(snapshot) <= LIMIT
-        return snapshot
+        self.shell(name, 'cd /carry; /usr/local/bin/compose-carry export --config clean.json', user='1000:1000')
+        bundle = self.get(name, 'carry.json')
+        assert len(bundle) <= LIMIT and b'private-ci-not-exported' not in bundle and b'PASSWORD' not in bundle
+        print('PASS: single export bundle retains source evidence without configuration secrets', flush=True)
+        return bundle
 
-    def target(self, name, snapshot):
-        self.put(name, 'source.json', snapshot)
+    def target(self, name, bundle):
+        self.put(name, 'carry.json', bundle)
+        self.execute(name, ['test', '!', '-e', '/carry/clean.json'])
         self.shell(name, 'touch /carry/data; chown 1000:1000 /carry/data')
-        self.check(name, 'gaps', 1, {'target_missing', 'type_mismatch'})
+        base = ['compose-carry', 'check', '--bundle', '/carry/carry.json', '--format', 'json']
+        no_context = json.loads(self.execute(name, base, expected=1))
+        assert no_context['resources']['summary']['unverified'] == 2
+        assert all(r['reason'] == 'context_required' for r in no_context['resources']['results'])
+        args = base + ['--docker-context', 'default']
+        gaps = json.loads(self.execute(name, args, expected=1))
+        assert {r['status'] for r in gaps['paths']['results']} == {'target_missing', 'type_mismatch', 'excluded'}
+        assert gaps['resources']['summary']['missing'] == 2
         self.shell(name, 'rm /carry/data; mkdir /carry/data; touch /carry/config; chown 1000:1000 /carry/data /carry/config')
-        self.check(name, 'fixed', 0, {'matched'})
+        self.execute(name, ['docker', 'volume', 'create', 'carry-ci-volume-renamed'])
+        self.execute(name, ['docker', 'network', 'create', '--internal', 'carry-ci-network-renamed'])
+        self.put(name, 'names.json', json.dumps({'volumes': {'carry-ci-volume': 'carry-ci-volume-renamed'}, 'networks': {'carry-ci-network': 'carry-ci-network-renamed'}}).encode())
+        args += ['--resource-map', '/carry/names.json']
+        repaired = json.loads(self.execute(name, args))
+        assert repaired['exit_code'] == 0 and repaired['paths']['summary']['matched'] == 2
+        assert repaired['resources']['summary']['present'] == 2 and repaired['resources']['results'] == []
+        assert len(repaired['paths']['results']) == 1 and repaired['paths']['results'][0]['status'] == 'excluded'
+        self.execute(name, args + ['--fail-on-excluded'], expected=1)
         self.shell(name, 'mv /carry/data /carry/moved')
         self.put(name, 'paths.json', b'{"/carry/data":"/carry/moved"}')
-        self.check(name, 'mapped', 0, {'matched'}, mapped=True)
+        args += ['--path-map', '/carry/paths.json']
+        mapped = json.loads(self.execute(name, args + ['--all']))
+        assert any(r['target_path'] == '/carry/moved' for r in mapped['paths']['results'])
+        assert {r['checked_name'] for r in mapped['resources']['results']} == {'carry-ci-volume-renamed', 'carry-ci-network-renamed'}
         self.shell(name, 'rm /carry/config; ln -s /carry/moved /carry/config')
-        self.check(name, 'linked', 1, {'matched', 'target_unverified'}, mapped=True)
-        print('PASS: missing/type mismatch, repaired paths, exact mapping and symlink rejection', flush=True)
-
-    def check(self, name, output, code, states, mapped=False):
-        args = ['compose-carry', 'target', '--manifest', '/carry/source.json', '--out', '/carry/' + output + '.json']
-        if mapped:
-            args += ['--path-map', '/carry/paths.json']
-        self.execute(name, args, expected=code)
-        report = json.loads(self.execute(name, ['compose-carry', 'compare', '--source', '/carry/source.json', '--target', '/carry/' + output + '.json', '--format', 'json'], expected=code))
-        assert len(report['results']) == 2 and {r['status'] for r in report['results']} == states
-        assert report['exit_code'] == code
-        if mapped:
-            assert any(r['target_path'] == '/carry/moved' for r in report['results'])
-
-    def resource_source(self, source):
-        self.execute(source, ['docker', 'volume', 'create', 'carry-ci-volume'])
-        self.execute(source, ['docker', 'network', 'create', '--internal', 'carry-ci-network'])
-        config = {'name': 'carry-ci-resources', 'services': {'app': {'image': 'busybox:latest',
-                  'environment': {'PASSWORD': 'private-ci-not-exported'},
-                  'volumes': [{'type': 'volume', 'source': 'data', 'target': '/data'}], 'networks': ['edge']}},
-                  'volumes': {'data': {'external': True, 'name': 'carry-ci-volume'}},
-                  'networks': {'edge': {'external': True, 'name': 'carry-ci-network'}}}
-        self.put(source, 'resource-compose.json', json.dumps(config).encode())
-        rendered = self.execute(source, ['docker', 'compose', '-f', '/carry/resource-compose.json', 'config', '--format', 'json'])
-        self.put(source, 'resource-rendered.json', rendered)
-        self.execute(source, ['compose-carry', 'resource-manifest', '--config', '/carry/resource-rendered.json', '--out', '/carry/resources.json'])
-        manifest = self.get(source, 'resources.json')
-        assert b'private-ci-not-exported' not in manifest and b'PASSWORD' not in manifest
-        report = json.loads(self.execute(source, ['compose-carry', 'resources', '--manifest', '/carry/resources.json', '--docker-context', 'default', '--format', 'json']))
-        assert report['summary']['present'] == 2
-        print('PASS: offline resource export excludes configuration secrets', flush=True)
-        return manifest
-
-    def resource_target(self, target, manifest):
-        self.put(target, 'resources.json', manifest)
-        self.execute(target, ['test', '!', '-e', '/carry/resource-rendered.json'])
-        self.execute(target, ['test', '!', '-e', '/carry/resource-compose.json'])
-        args = ['compose-carry', 'resources', '--manifest', '/carry/resources.json', '--docker-context', 'default', '--format', 'json']
-        report = json.loads(self.execute(target, args, expected=1))
-        assert report['summary']['missing'] == 2
-        self.execute(target, ['docker', 'volume', 'create', 'carry-ci-volume-renamed'])
-        self.execute(target, ['docker', 'network', 'create', '--internal', 'carry-ci-network-renamed'])
-        mapping = {'volumes': {'carry-ci-volume': 'carry-ci-volume-renamed'},
-                   'networks': {'carry-ci-network': 'carry-ci-network-renamed'}}
-        self.put(target, 'resource-map.json', json.dumps(mapping).encode())
-        report = json.loads(self.execute(target, args + ['--resource-map', '/carry/resource-map.json']))
-        assert report['summary']['present'] == 2
-        assert {(r['kind'], r['name'], r['checked_name']) for r in report['results']} == {
-            ('volume', 'carry-ci-volume', 'carry-ci-volume-renamed'),
-            ('network', 'carry-ci-network', 'carry-ci-network-renamed')}
-        assert self.get(target, 'resources.json') == manifest
-        print('PASS: manifest-only destination detects missing resources and verifies explicit renames', flush=True)
+        linked = json.loads(self.execute(name, args, expected=1))
+        assert linked['paths']['summary']['target_unverified'] == 1
+        assert self.get(name, 'carry.json') == bundle
+        self.execute(name, ['test', '!', '-e', '/carry/target.json'])
+        print('PASS: unified check handles gaps, context, repairs, maps, strict exclusions and symlinks without target snapshots', flush=True)
 
 
 def cleanup(state):
@@ -186,11 +164,9 @@ def main():
         try:
             if args.mode == 'source':
                 source, target = servers.start('source'), servers.start('target')
-                snapshot = servers.source(source)
-                servers.target(target, snapshot)
-                resources = servers.resource_source(source)
-                servers.resource_target(target, resources)
-                payload = base64.b64encode(json.dumps({'arch': args.arch, 'commit': commit, 'snapshot': json.loads(snapshot), 'resources': json.loads(resources)}, separators=(',', ':')).encode()).decode()
+                bundle = servers.source(source)
+                servers.target(target, bundle)
+                payload = base64.b64encode(json.dumps({'arch': args.arch, 'commit': commit, 'bundle': json.loads(bundle)}, separators=(',', ':')).encode()).decode()
                 assert len(payload) <= LIMIT
                 with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
                     output.write('snapshot=' + payload + '\n')
@@ -202,18 +178,16 @@ def main():
                 envelope = json.loads(decoded)
                 assert envelope['arch'] == {'amd64': 'arm64', 'arm64': 'amd64'}[args.arch]
                 assert envelope['commit'] == commit
-                snapshot = envelope['snapshot']
+                bundle = envelope['bundle']
+                assert bundle['kind'] == 'compose-carry.bundle' and bundle['version'] == 1
+                snapshot, resources = bundle['paths'], bundle['resources']
                 assert snapshot['version'] == 1 and snapshot['phase'] == 'source'
-                assert len(snapshot['entries']) == 2
-                assert {e['dependency']['path'] for e in snapshot['entries']} == {'/carry/data', '/carry/config'}
-                resources = envelope['resources']
+                assert len(snapshot['entries']) == 3
+                assert {e['dependency']['path'] for e in snapshot['entries']} == {'/carry/data', '/carry/config', ''}
                 assert resources['kind'] == 'compose-carry.resources' and resources['version'] == 1
-                assert len(resources['resources']) == 2
                 assert {(r['kind'], r['name']) for r in resources['resources']} == {('volume', 'carry-ci-volume'), ('network', 'carry-ci-network')}
-                target = servers.start('cross-target')
-                servers.target(target, json.dumps(snapshot).encode())
-                servers.resource_target(target, json.dumps(resources).encode())
-                print(f'PASS: actual {envelope["arch"]} path snapshot and resource manifest checked on native {args.arch}', flush=True)
+                servers.target(servers.start('cross-target'), json.dumps(bundle).encode())
+                print(f'PASS: actual {envelope["arch"]} export bundle checked on native {args.arch}', flush=True)
         finally:
             cleanup(state)
 

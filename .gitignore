@@ -5,6 +5,7 @@
 *.test
 *.test.exe
 /compose.json
+/carry.json
 /source.json
 /target.json
 *.snapshot.json

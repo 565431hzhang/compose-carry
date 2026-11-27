@@ -6,7 +6,40 @@
 
 把 Compose 文件复制过去，不代表宿主机上的配置文件、密钥文件和挂载目录也齐全。本工具对照源机快照，报告目标机的路径缺失、类型不符与未验证项。
 
-v0.5 是早期命令行版本：Linux 主机路径扫描、跨平台离线比较，以及可选的 Docker CLI 外部资源检查；只有 resources 命令需要 Docker CLI 访问 daemon。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
+v0.6 是早期命令行版本：Linux 主机路径扫描、跨平台离线比较，以及可选的 Docker CLI 外部资源检查；resources 和 check 的外部资源部分需要 Docker CLI 访问 daemon。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
+
+## 快速上手：一个检查包，两个命令（Linux）
+
+需要 v0.6 或当前源码构建，旧发行二进制不含 export/check。先在**源机**按实际部署的文件、环境和 profile 参数准备 Compose JSON：
+
+```sh
+umask 077
+docker compose config --format json > compose.json
+```
+
+**源机导出：**
+
+```sh
+./compose-carry export --config compose.json
+```
+
+默认生成 `carry.json`，包含源路径快照和最小外部资源清单。可能含密码的 `compose.json` 留在源机；通过自己的安全方式只传 `carry.json` 和匹配平台的程序。导出不查询 Docker、不复制依赖文件内容、不执行迁移；即使存在源机问题，成功写包仍返回 `0`，摘要会列出未验证/排除条目。已有输出不覆盖，重新导出可指定 `--out another.json`。
+
+**目标机检查：**
+
+```sh
+./compose-carry check --docker-context default
+```
+
+在目标 Linux 主机对应挂载的文件系统命名空间中运行。选择实际目标 context，不要盲目照抄 default；远程 context 未必就是本次路径扫描的主机。没有外部资源时直接 `./compose-carry check` 即可。有外部资源却未指定 context 时，路径仍检查，资源显示 `unverified/context_required`，不调用 Docker，退出 `1`。
+
+一次报告同时展示路径和资源，默认只列问题；不必生成目标快照或再运行 compare。`--all` 显示成功项，`--format json` 供脚本使用，`--bundle another.json` 指定输入。新旧位置或名称不同时，沿用原来的 `--path-map` 和 `--resource-map`。
+
+check 只有在至少存在一项范围内依赖且全部通过时返回 `0`；缺口、未验证或无检查项返回 `1`；输入、平台或输出故障返回 `2`。一个空分栏不会使另一个成功分栏失败。`--fail-on-excluded` 仍对路径排除项严格失败，即使资源栏同一外部资源存在也不消除它：存在性并不验证路径范围外的内容。
+
+检查包为严格版本化 JSON，**整个包合计上限16 MiB**，Linux 新文件权限0600。名称/路径仍可能敏感，格式校验不证明真实性或完整性；check 不修改包。JSON 只有一个顶层 exit_code，各分栏保留全量汇总及明确的 only_problems/fail_on_excluded 标志，过滤后的数组不等于完整清单。两个分栏可能重叠，不能简单相加为唯一路径/资源数。
+
+两个新命令均要求 Linux。下方原有细分命令仍可用于高级流程和跨平台离线比较；不自动连接 SSH、部署、传输或修复。
 
 ## 安装发行包
 
@@ -63,7 +96,7 @@ GOOS=linux GOARCH=amd64 go build -o compose-carry ./cmd/compose-carry
 
 ARM64 主机改用 `GOARCH=arm64`。扫描必须直接在 Docker daemon 所在的 Linux 主机及相应文件系统命名空间中执行；不能在普通容器里或仅通过远程 Docker context 的客户端检查。Windows/macOS 不支持路径扫描，可离线比较；resources 则依赖可用的 Docker CLI/context，不依赖本地 Linux 路径访问。
 
-## 使用流程
+## 高级用法：分步生成路径快照与比较
 
 ### 1. 在源机导出配置并生成快照
 
@@ -118,7 +151,7 @@ JSON 报告包含核对范围、范围内条目数、排除条目数、退出码
 
 `--only-problems` 只隐藏 matched 行，排除项仍显示；全量汇总、计数和退出判定不受过滤影响。JSON 显式包含 `only_problems`、`fail_on_excluded`，过滤后的空 `results` 是 `[]`，不代表没有执行检查。文本先显示全量汇总，再列条目并说明显示数量。
 
-`--fail-on-excluded` 在存在**已记录**的排除项时返回 `1`，即使范围内路径全部匹配。默认策略不变。两个选项仅用于 compare，不改变 source/target 行为和 v1/v2 快照格式。网络等未枚举资源仍未检查，不能将该选项当作完整迁移准入检查。
+`--fail-on-excluded` 在存在**已记录**的排除项时返回 `1`，即使范围内路径全部匹配。默认策略不变。这些比较选项不改变 source/target 行为和 v1/v2 快照格式；统一 check 使用 --all 控制显示，也支持 --fail-on-excluded。网络等未枚举资源仍未检查，不能将该选项当作完整迁移准入检查。
 
 JSON 成功写出时，`exit_code` 与进程退出码一致；输出故障仍返回 `2`，部分写出的报告应丢弃。
 
@@ -237,7 +270,7 @@ JSON 成功写出时，`exit_code` 与进程退出码一致；输出故障仍返
 
 ## 隐私与限制
 
-- 路径流程不联网、不递归目录、不读取依赖文件内容、不修改被扫描路径；resources 则显式查询 Docker。Linux 使用只获取元数据的文件句柄，逐级拒绝符号链接。
+- 路径流程不联网、不递归目录、不读取依赖文件内容、不修改被扫描路径；resources 和显式指定 context 的 check 则查询 Docker。Linux 使用只获取元数据的文件句柄，逐级拒绝符号链接。
 - 必须读取用户明确指定的配置和快照输入，单个输入及生成快照上限均为 16 MiB，超大快照在创建输出前拒绝。Linux 输出快照权限为 `0600`；终端输出或重定向报告的权限由 shell 决定。
 - 路径、服务名称和引用仍可能敏感，不要公开真实快照；没有通用脱敏和签名功能。
 - 快照只是一个时间点的观察，不证明主机身份、时效或真实性。依赖 ID 用于发现不一致，不防范协调篡改；依赖与源证据完全一致的不同主机快照仍可兼容，用户须选对文件。
@@ -271,7 +304,7 @@ COMPOSE_CARRY_TEST_RESOURCES=1 go test ./cmd/compose-carry -run TestDockerResour
 
 两个源端 job 使用标准 `ubuntu-24.04` 和 `ubuntu-24.04-arm` 并行运行。每个 job 启动独立的源端、目标端特权 DinD 容器；扫描程序在对应文件系统命名空间内以 UID 1000、零有效 capabilities 执行，只有 daemon 设置需要特权。覆盖缺失、类型不符、修复、映射、链接、权限拒绝和两端外部资源差异。不挂宿主 Docker socket，不发布 daemon TCP 端口。
 
-随后两个目标端 job 并行，分别在原生 ARM64 检查 AMD64 生成的源路径快照和资源清单，以及反方向核对。资源测试只传清单，先验证缺失，再检查明确改名的目标卷和网络，不复制源 Compose 配置。路径快照与资源清单合计编码后不超过16 KiB，仅通过 job outputs 传递，输出缺失、架构或提交不匹配直接失败；不用 QEMU 或外部中转。这是容器隔离测试，不等同于两台物理机。
+随后两个目标端 job 并行，分别在原生 ARM64 检查 AMD64 实际导出的统一检查包，以及反方向核对。包内含源路径快照与最小资源清单，覆盖缺失、未指定 context、修复、两种映射和严格排除策略；不复制源 Compose 配置，不写目标快照。合成检查包及架构/提交封套合计编码后不超过16 KiB，仅通过 job outputs 传递，输出缺失、架构或提交不匹配直接失败；不用 QEMU 或外部中转。这是容器隔离测试，不等同于两台物理机。
 
 所有 job 要求公开仓库，只使用标准 runner；Linux 最长25分钟、Windows 最长10分钟。关闭缓存，不上传 Actions artifacts 或持久构建缓存；安装包只在 runner 临时生成，测试后删除。DinD 容器及匿名卷由 finally 和 always 步骤清理；硬取消后由 GitHub 销毁临时 runner。显式标签发行附件与测试产物分开。免费依赖 GitHub 的公开仓库标准 runner 政策，不代表能控制账号其他工作流或费用。
 
