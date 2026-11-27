@@ -17,7 +17,9 @@ const usage = `compose-carry ` + buildinfo.Version + ` — read-only host-path c
   compose-carry target --manifest source.json [--path-map paths.json] --out target.json
   compose-carry compare --source source.json --target target.json --format text|json
     [--only-problems] [--fail-on-excluded]
-  compose-carry resources --config compose.json --docker-context NAME [--format text|json]
+  compose-carry resource-manifest --config compose.json --out resources.json
+  compose-carry resources (--config compose.json | --manifest resources.json) --docker-context NAME
+    [--resource-map names.json] [--format text|json]
 
 Resources queries Docker (possibly remote) for external volume/network existence only.
 
@@ -69,6 +71,9 @@ func run(args []string, out, errOut io.Writer) int {
 			return fail(fmt.Errorf("cannot write version"))
 		}
 		return 0
+	}
+	if args[0] == "resource-manifest" {
+		return runResourceManifest(args[1:], out, errOut)
 	}
 	if args[0] == "resources" {
 		return runResources(args[1:], out, errOut, queryDocker)

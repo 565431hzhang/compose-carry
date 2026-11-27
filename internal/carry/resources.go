@@ -77,9 +77,10 @@ func resourceHint(reason string) string {
 
 type ResourceResult struct {
 	Resource
-	Status string `json:"status"`
-	Reason string `json:"reason"`
-	Hint   string `json:"hint,omitempty"`
+	Status      string `json:"status"`
+	Reason      string `json:"reason"`
+	Hint        string `json:"hint,omitempty"`
+	CheckedName string `json:"checked_name"`
 }
 
 type ResourceSummary struct {
@@ -312,6 +313,17 @@ func unresolvedName(name string) bool {
 }
 
 func CheckResources(resources []Resource, dockerContext string, query func(string) ([]byte, error)) ResourceReport {
+	return checkResources(resources, dockerContext, nil, query)
+}
+
+func CheckResourcesWithMap(resources []Resource, dockerContext string, mapping ResourceMap, query func(string) ([]byte, error)) (ResourceReport, error) {
+	if err := mapping.Validate(resources); err != nil {
+		return ResourceReport{}, err
+	}
+	return checkResources(resources, dockerContext, mapping, query), nil
+}
+
+func checkResources(resources []Resource, dockerContext string, mapping ResourceMap, query func(string) ([]byte, error)) ResourceReport {
 	report := ResourceReport{Scope: ResourceScope, DockerContext: dockerContext, Results: []ResourceResult{}}
 	inventories := map[string][]inventoryEntry{}
 	reasons := map[string]string{}
@@ -338,7 +350,7 @@ func CheckResources(resources []Resource, dockerContext string, query func(strin
 		inventories[kind] = inventory
 	}
 	for _, r := range resources {
-		result := ResourceResult{Resource: r, Status: "unverified", Reason: reasons[r.Kind]}
+		result := ResourceResult{Resource: r, CheckedName: mapping.checkedName(r), Status: "unverified", Reason: reasons[r.Kind]}
 		switch {
 		case r.Kind != "volume" && r.Kind != "network":
 			result.Reason = "unsupported_kind"
@@ -348,7 +360,7 @@ func CheckResources(resources []Resource, dockerContext string, query func(strin
 		default:
 			matches := 0
 			for _, entry := range inventories[r.Kind] {
-				if entry.name == r.Name || (r.Kind == "network" && strings.HasPrefix(entry.id, r.Name)) {
+				if entry.name == result.CheckedName || (r.Kind == "network" && strings.HasPrefix(entry.id, result.CheckedName)) {
 					matches++
 				}
 			}

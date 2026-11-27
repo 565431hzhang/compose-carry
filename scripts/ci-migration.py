@@ -110,17 +110,44 @@ class Servers:
         if mapped:
             assert any(r['target_path'] == '/carry/moved' for r in report['results'])
 
-    def resources(self, source, target):
+    def resource_source(self, source):
         self.execute(source, ['docker', 'volume', 'create', 'carry-ci-volume'])
         self.execute(source, ['docker', 'network', 'create', '--internal', 'carry-ci-network'])
-        config = {'services': {'app': {'image': 'busybox:latest', 'volumes': [{'type': 'volume', 'source': 'data', 'target': '/data'}], 'networks': ['edge']}},
+        config = {'name': 'carry-ci-resources', 'services': {'app': {'image': 'busybox:latest',
+                  'environment': {'PASSWORD': 'private-ci-not-exported'},
+                  'volumes': [{'type': 'volume', 'source': 'data', 'target': '/data'}], 'networks': ['edge']}},
                   'volumes': {'data': {'external': True, 'name': 'carry-ci-volume'}},
                   'networks': {'edge': {'external': True, 'name': 'carry-ci-network'}}}
-        for name, code, status in [(source, 0, 'present'), (target, 1, 'missing')]:
-            self.put(name, 'resources.json', json.dumps(config).encode())
-            report = json.loads(self.execute(name, ['compose-carry', 'resources', '--config', '/carry/resources.json', '--docker-context', 'default', '--format', 'json'], expected=code))
-            assert report['summary'][status] == 2
-        print('PASS: independent Docker daemons expose different external resources', flush=True)
+        self.put(source, 'resource-compose.json', json.dumps(config).encode())
+        rendered = self.execute(source, ['docker', 'compose', '-f', '/carry/resource-compose.json', 'config', '--format', 'json'])
+        self.put(source, 'resource-rendered.json', rendered)
+        self.execute(source, ['compose-carry', 'resource-manifest', '--config', '/carry/resource-rendered.json', '--out', '/carry/resources.json'])
+        manifest = self.get(source, 'resources.json')
+        assert b'private-ci-not-exported' not in manifest and b'PASSWORD' not in manifest
+        report = json.loads(self.execute(source, ['compose-carry', 'resources', '--manifest', '/carry/resources.json', '--docker-context', 'default', '--format', 'json']))
+        assert report['summary']['present'] == 2
+        print('PASS: offline resource export excludes configuration secrets', flush=True)
+        return manifest
+
+    def resource_target(self, target, manifest):
+        self.put(target, 'resources.json', manifest)
+        self.execute(target, ['test', '!', '-e', '/carry/resource-rendered.json'])
+        self.execute(target, ['test', '!', '-e', '/carry/resource-compose.json'])
+        args = ['compose-carry', 'resources', '--manifest', '/carry/resources.json', '--docker-context', 'default', '--format', 'json']
+        report = json.loads(self.execute(target, args, expected=1))
+        assert report['summary']['missing'] == 2
+        self.execute(target, ['docker', 'volume', 'create', 'carry-ci-volume-renamed'])
+        self.execute(target, ['docker', 'network', 'create', '--internal', 'carry-ci-network-renamed'])
+        mapping = {'volumes': {'carry-ci-volume': 'carry-ci-volume-renamed'},
+                   'networks': {'carry-ci-network': 'carry-ci-network-renamed'}}
+        self.put(target, 'resource-map.json', json.dumps(mapping).encode())
+        report = json.loads(self.execute(target, args + ['--resource-map', '/carry/resource-map.json']))
+        assert report['summary']['present'] == 2
+        assert {(r['kind'], r['name'], r['checked_name']) for r in report['results']} == {
+            ('volume', 'carry-ci-volume', 'carry-ci-volume-renamed'),
+            ('network', 'carry-ci-network', 'carry-ci-network-renamed')}
+        assert self.get(target, 'resources.json') == manifest
+        print('PASS: manifest-only destination detects missing resources and verifies explicit renames', flush=True)
 
 
 def cleanup(state):
@@ -161,8 +188,9 @@ def main():
                 source, target = servers.start('source'), servers.start('target')
                 snapshot = servers.source(source)
                 servers.target(target, snapshot)
-                servers.resources(source, target)
-                payload = base64.b64encode(json.dumps({'arch': args.arch, 'commit': commit, 'snapshot': json.loads(snapshot)}, separators=(',', ':')).encode()).decode()
+                resources = servers.resource_source(source)
+                servers.resource_target(target, resources)
+                payload = base64.b64encode(json.dumps({'arch': args.arch, 'commit': commit, 'snapshot': json.loads(snapshot), 'resources': json.loads(resources)}, separators=(',', ':')).encode()).decode()
                 assert len(payload) <= LIMIT
                 with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
                     output.write('snapshot=' + payload + '\n')
@@ -178,8 +206,14 @@ def main():
                 assert snapshot['version'] == 1 and snapshot['phase'] == 'source'
                 assert len(snapshot['entries']) == 2
                 assert {e['dependency']['path'] for e in snapshot['entries']} == {'/carry/data', '/carry/config'}
-                servers.target(servers.start('cross-target'), json.dumps(snapshot).encode())
-                print(f'PASS: actual {envelope["arch"]} source snapshot checked on native {args.arch}', flush=True)
+                resources = envelope['resources']
+                assert resources['kind'] == 'compose-carry.resources' and resources['version'] == 1
+                assert len(resources['resources']) == 2
+                assert {(r['kind'], r['name']) for r in resources['resources']} == {('volume', 'carry-ci-volume'), ('network', 'carry-ci-network')}
+                target = servers.start('cross-target')
+                servers.target(target, json.dumps(snapshot).encode())
+                servers.resource_target(target, json.dumps(resources).encode())
+                print(f'PASS: actual {envelope["arch"]} path snapshot and resource manifest checked on native {args.arch}', flush=True)
         finally:
             cleanup(state)
 

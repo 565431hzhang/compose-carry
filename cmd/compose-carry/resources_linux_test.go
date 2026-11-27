@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +127,30 @@ func TestDockerResourcesIntegration(t *testing.T) {
 		}
 		if report.ExitCode != code {
 			t.Fatal(report)
+		}
+		manifest := filepath.Join(t.TempDir(), "resources.json")
+		export := exec.CommandContext(ctx, binary, "resource-manifest", "--config", config, "--out", manifest)
+		export.Env = []string{"PATH=", "HOME=" + root}
+		if out, err := export.CombinedOutput(); err != nil {
+			t.Fatal("offline export failed", err, string(out))
+		}
+		info, err := os.Stat(manifest)
+		if err != nil || info.Mode().Perm() != 0600 {
+			t.Fatal("manifest must be private", err)
+		}
+		command = exec.CommandContext(ctx, binary, "resources", "--manifest", manifest, "--docker-context", "default", "--format", "json")
+		out, err = command.Output()
+		code = 0
+		if err != nil {
+			if exit, ok := err.(*exec.ExitError); ok {
+				code = exit.ExitCode()
+			} else {
+				t.Fatal(err)
+			}
+		}
+		var carried carry.ResourceReport
+		if json.Unmarshal(out, &carried) != nil || code != want || !reflect.DeepEqual(report, carried) {
+			t.Fatalf("manifest check differs: %s", out)
 		}
 		return report
 	}

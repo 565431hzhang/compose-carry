@@ -6,7 +6,7 @@
 
 `compose-carry` compares the source host's bind mounts and file-backed configs/secrets with paths on the destination host. It answers a small question: **which listed paths are missing, have the wrong type, or could not be checked?**
 
-It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.4 is an early CLI: Linux host-path scanning, portable offline comparison, and an optional Docker CLI-based external resource check. Docker Compose exports your configuration; only `resources` requires Docker CLI access to a daemon.
+It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.5 is an early CLI: Linux host-path scanning, portable offline comparison, and an optional Docker CLI-based external resource check. Docker Compose exports your configuration; only `resources` requires Docker CLI access to a daemon.
 
 ## Install a packaged binary
 
@@ -149,7 +149,7 @@ No map means snapshot format v1. Supplying a map, even `{}`, creates a target-on
 ./compose-carry resources --config compose.json --docker-context destination --format json
 ```
 
-Use an existing, explicitly selected Docker context (`default` is allowed). Endpoint overrides (`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_TLS`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`) are removed only from the query subprocess environment; context storage and credentials are preserved. This separate command reads rendered Compose JSON and queries that context's daemon, which may be remote. It does not consume or change path snapshots, merge reports, transfer configuration, or verify that the selected daemon is the host used for path scanning. Keep the rendered input private; do not transfer a secret-containing configuration just to run this command.
+Use an existing, explicitly selected Docker context (`default` is allowed). Endpoint overrides (`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_TLS`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`) are removed only from the query subprocess environment; context storage and credentials are preserved. This separate command reads rendered Compose JSON or a minimal resource manifest and queries that context's daemon, which may be remote. It does not consume or change path snapshots, merge reports, transfer configuration, or verify that the selected daemon is the host used for path scanning. Keep the rendered input private; do not transfer a secret-containing configuration just to run this command.
 
 Only service-referenced `external: true` volumes and networks are checked. The top-level `name` overrides the logical key without a project prefix. Shared references are grouped by kind/name; the report retains service/key references. Implicit external `default` networks are included unless the service uses `network_mode`. Managed resources, anonymous volumes and unused definitions are ignored. Use rendered JSON with boolean `external`, not legacy object syntax.
 
@@ -158,6 +158,43 @@ The tool requests projected volume names and network names/full IDs using read-o
 Results are `present`, `missing`, or `unverified`, with summary counts and reason codes. Missing means absent from a successfully parsed list. Failed queries, missing Docker CLI, timeouts, oversized output or malformed inventories never mean missing. Each query has a 15-second deadline, a 16 MiB stdout cap and a one-second post-exit pipe wait limit; raw stderr is discarded. Only referenced resources are reported, not unrelated daemon inventory.
 
 Exit codes: `0` requires at least one resource and all present; `1` means missing, unverified or no resources; `2` means input/argument/report-write failure. No resources means no Docker call. Presence does not prove volume contents, driver/subnet compatibility, connectivity, permissions or application readiness. Docker contexts and their transport helpers are user-managed and must be trusted; no containers are started and no Docker resources are modified by this command.
+
+### Carry only the resource manifest
+
+On the source machine, export a minimal manifest without contacting Docker:
+
+```sh
+./compose-carry resource-manifest --config compose.json --out resources.json
+```
+
+Transfer only `resources.json` using your own secure transport, then check the selected destination context:
+
+```sh
+./compose-carry resources --manifest resources.json --docker-context destination --format json
+```
+
+The manifest contains only referenced external resource kinds, names, and service/logical-key references. Environment values, inline secrets, labels, driver options and daemon details are not copied. Names can still be sensitive: inspect the file before sharing it. The original Compose export stays private on the source. Export works without Docker installed and returns `0` even for an empty list: **export is not verification**. Checking an empty manifest returns `1` without invoking Docker.
+
+`--config` and `--manifest` are mutually exclusive. Resource manifests use a separate `compose-carry.resources` version 1 format, not path snapshots. Unknown fields/versions, duplicate keys/resources and conflicting references are rejected; this does not prove authenticity, freshness or completeness. Inputs and generated manifests are capped at 16 MiB. Outputs are new files only, mode `0600` on Linux, never overwritten. A failed summary write can return `2` after the manifest was already written; inspect it rather than blindly retrying to the same filename.
+
+### Renamed destination resources
+
+Create a private `names.json`; categories may be omitted:
+
+```json
+{
+  "volumes": {"old-db-data": "new-db-data"},
+  "networks": {"old-edge": "new-edge"}
+}
+```
+
+```sh
+./compose-carry resources --manifest resources.json --resource-map names.json --docker-context destination --format json
+```
+
+Maps also work with `--config`. Keys match the complete original name in their category, not a Compose logical key or prefix. Unmapped resources retain their original names. Unknown sources, duplicate keys, empty/non-string names, unresolved variables/control characters and many-to-one target-name collisions (including unmapped resources) fail before any Docker query. Volume and network names are separate namespaces. Network target references still support full IDs and unique ID prefixes; different references resolving to the same Docker object are not detected as name collisions, and presence is not identity verification.
+
+Reports preserve `name` and `references`, adding `checked_name` for the actual query target. No resource is renamed or created, Compose is not rewritten, and source identity, volume content and network equivalence are not verified. Existing path snapshots v1/v2 and their commands are unchanged. No-map `resources --config` retains its prior status/exit behavior with the additional `checked_name` field.
 
 ### Resource diagnostics
 
@@ -235,7 +272,7 @@ The resource integration test is opt-in locally and explicitly enabled on dispos
 
 Two source jobs run concurrently on standard `ubuntu-24.04` and `ubuntu-24.04-arm`. Each runs two independent privileged DinD containers: source and destination. The scanner executes inside the corresponding filesystem namespace as UID 1000 with zero effective capabilities; only daemon setup is privileged. Tests cover missing/type-mismatched paths, repairs, mapping, symlinks, permission denial and independent external resources. No host Docker socket is mounted and no daemon TCP port is published.
 
-Two destination jobs then run concurrently, checking AMD64 source snapshots on native ARM64 and the reverse. Only small synthetic snapshots, bounded to 16 KiB after base64 encoding, cross jobs through outputs; missing/mismatched outputs fail the test. No QEMU or external relay is used. These are container-isolated environments, not two physical servers.
+Two destination jobs then run concurrently, checking AMD64 source path snapshots and exported resource manifests on native ARM64 and the reverse. Resource tests transfer only the manifest, detect missing resources, then check explicitly renamed destination volumes/networks without copying the source Compose configuration. Only small synthetic snapshots/manifests, bounded together to 16 KiB after base64 encoding, cross jobs through outputs; missing/mismatched outputs fail the test. No QEMU or external relay is used. These are container-isolated environments, not two physical servers.
 
 All jobs require a public repository and use standard runners. Linux jobs stop after 25 minutes, Windows after 10. Setup caches are disabled; no Actions artifacts or persistent build caches are uploaded. Packages exist only temporarily on the runner and are removed after tests. DinD containers and their anonymous volumes are removed on normal/failure exits with an always-run fallback; GitHub disposes of the runner after hard cancellation. Explicit tag-triggered Release attachments are separate from test artifacts. Free execution relies on GitHub's public-repository standard-runner policy; these safeguards do not control other account workflows or charges.
 

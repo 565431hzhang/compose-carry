@@ -6,7 +6,7 @@
 
 把 Compose 文件复制过去，不代表宿主机上的配置文件、密钥文件和挂载目录也齐全。本工具对照源机快照，报告目标机的路径缺失、类型不符与未验证项。
 
-v0.4 是早期命令行版本：Linux 主机路径扫描、跨平台离线比较，以及可选的 Docker CLI 外部资源检查；只有 resources 命令需要 Docker CLI 访问 daemon。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
+v0.5 是早期命令行版本：Linux 主机路径扫描、跨平台离线比较，以及可选的 Docker CLI 外部资源检查；只有 resources 命令需要 Docker CLI 访问 daemon。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
 
 ## 安装发行包
 
@@ -150,7 +150,7 @@ JSON 成功写出时，`exit_code` 与进程退出码一致；输出故障仍返
 ./compose-carry resources --config compose.json --docker-context destination --format json
 ```
 
-必须显式选择已有 Docker context（允许 `default`）。查询子进程会移除 DOCKER_HOST、DOCKER_CONTEXT、DOCKER_TLS、DOCKER_TLS_VERIFY、DOCKER_CERT_PATH 端点覆盖变量，保留 context 存储和凭据，不修改系统环境。这是独立命令：读取已渲染的 Compose JSON，通过 Docker CLI 查询该 context 的 daemon，可能访问远程主机；不读取或修改路径快照、不合并报告、不传输配置，也不证明所选 daemon 与路径扫描主机一致。渲染配置仍可能含密码，不要为了该命令随意传输或公开它。
+必须显式选择已有 Docker context（允许 `default`）。查询子进程会移除 DOCKER_HOST、DOCKER_CONTEXT、DOCKER_TLS、DOCKER_TLS_VERIFY、DOCKER_CERT_PATH 端点覆盖变量，保留 context 存储和凭据，不修改系统环境。这是独立命令：读取已渲染的 Compose JSON 或最小资源清单，通过 Docker CLI 查询该 context 的 daemon，可能访问远程主机；不读取或修改路径快照、不合并报告、不传输配置，也不证明所选 daemon 与路径扫描主机一致。渲染配置仍可能含密码，不要为了该命令随意传输或公开它。
 
 仅检查服务实际引用的 `external: true` 命名卷和网络。顶层 `name` 优先于逻辑键，不添加项目名前缀；按资源种类和名称合并重复引用，保留服务/逻辑键关联。隐式外部 default 网络会纳入，但 `network_mode` 服务不添加默认网络。普通 Compose 管理资源、匿名卷、未引用定义不检查；输入须使用布尔 external 的渲染 JSON，不支持旧式 external 对象。
 
@@ -159,6 +159,43 @@ JSON 成功写出时，`exit_code` 与进程退出码一致；输出故障仍返
 结果为 `present`、`missing`、`unverified`，附汇总与原因码。只有成功解析的清单里没有候选才算缺失；CLI 不存在、查询失败、超时、输出超限或格式错误不能算缺失。每类查询15秒截止、stdout 上限16 MiB、退出后管道等待上限1秒，原始 stderr 不回显；报告只包含被引用资源，不泄露无关清单。
 
 退出码：至少一项且全部存在为 `0`，缺失/未验证/无项为 `1`，参数、输入或报告写入错误为 `2`；无项时不调用 Docker。存在不代表卷内容、驱动、子网、连接性、权限或应用可用。Docker context 及传输助手由用户管理，须可信；该命令不会启动容器或修改 Docker 资源。
+
+### 跨机只携带最小资源清单
+
+在源机离线导出，不连接 Docker：
+
+```sh
+./compose-carry resource-manifest --config compose.json --out resources.json
+```
+
+通过你自己的安全传输方式只带上 `resources.json`，再核对目标 context：
+
+```sh
+./compose-carry resources --manifest resources.json --docker-context destination --format json
+```
+
+清单仅保留被引用的外部资源种类、名称以及服务/逻辑键关联，不复制环境变量值、内联秘密、标签、驱动选项或 daemon 信息。名称本身仍可能敏感，传递前请审阅；原始 Compose 导出留在源机。无须安装 Docker 即可导出；即使清单为空，导出成功也返回 `0`，**导出不等于验证**。检查空清单返回 `1`，且不调用 Docker。
+
+`--config` 与 `--manifest` 必须且只能选一个。资源清单为独立的 `compose-carry.resources` v1 格式，不是路径快照；拒绝未知字段/版本、重复键/资源和冲突引用，但这些校验不证明真实性、时效或完整性。输入和生成清单上限16 MiB；输出必须为新文件，Linux 权限0600，不覆盖已有文件。若清单写完后终端摘要写入失败，仍返回 `2`；请先检查已写出的文件，不要直接用同名重试。
+
+### 目标资源改名
+
+准备私有 `names.json`，没有映射的类别可省略：
+
+```json
+{
+  "volumes": {"old-db-data": "new-db-data"},
+  "networks": {"old-edge": "new-edge"}
+}
+```
+
+```sh
+./compose-carry resources --manifest resources.json --resource-map names.json --docker-context destination --format json
+```
+
+映射也支持 `--config`。键是对应类别里的完整原资源名，不是 Compose 逻辑键，不做前缀替换；未映射项继续使用原名。未知原名、重复键、空/非字符串名称、未解析变量/控制字符、同类别多对一目标名称（包括和未映射项碰撞）均在 Docker 查询前拒绝。卷和网络属于不同命名空间。网络目标仍支持完整 ID 与唯一 ID 前缀；不同引用实际解析到同一 Docker 对象的情况不算名称冲突，存在性检查也不证明身份等同。
+
+报告保留 `name` 与 `references`，新增 `checked_name` 表示实际核对目标。工具不会重命名或创建资源、不会改写 Compose，也不证明源目标身份、卷内容或网络配置相同。现有路径快照 v1/v2 及命令不变；不带映射的 `resources --config` 保持原状态和退出码，仅新增 `checked_name` 字段。
 
 ### 资源查询诊断
 
@@ -234,7 +271,7 @@ COMPOSE_CARRY_TEST_RESOURCES=1 go test ./cmd/compose-carry -run TestDockerResour
 
 两个源端 job 使用标准 `ubuntu-24.04` 和 `ubuntu-24.04-arm` 并行运行。每个 job 启动独立的源端、目标端特权 DinD 容器；扫描程序在对应文件系统命名空间内以 UID 1000、零有效 capabilities 执行，只有 daemon 设置需要特权。覆盖缺失、类型不符、修复、映射、链接、权限拒绝和两端外部资源差异。不挂宿主 Docker socket，不发布 daemon TCP 端口。
 
-随后两个目标端 job 并行，分别在原生 ARM64 检查 AMD64 生成的源快照，以及反方向核对。仅通过 job outputs 传递编码后不超过16 KiB的合成快照，输出缺失、架构或提交不匹配直接失败；不用 QEMU 或外部中转。这是容器隔离测试，不等同于两台物理机。
+随后两个目标端 job 并行，分别在原生 ARM64 检查 AMD64 生成的源路径快照和资源清单，以及反方向核对。资源测试只传清单，先验证缺失，再检查明确改名的目标卷和网络，不复制源 Compose 配置。路径快照与资源清单合计编码后不超过16 KiB，仅通过 job outputs 传递，输出缺失、架构或提交不匹配直接失败；不用 QEMU 或外部中转。这是容器隔离测试，不等同于两台物理机。
 
 所有 job 要求公开仓库，只使用标准 runner；Linux 最长25分钟、Windows 最长10分钟。关闭缓存，不上传 Actions artifacts 或持久构建缓存；安装包只在 runner 临时生成，测试后删除。DinD 容器及匿名卷由 finally 和 always 步骤清理；硬取消后由 GitHub 销毁临时 runner。显式标签发行附件与测试产物分开。免费依赖 GitHub 的公开仓库标准 runner 政策，不代表能控制账号其他工作流或费用。
 

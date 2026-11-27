@@ -17,7 +17,7 @@ import (
 	"github.com/565431hzhang/compose-carry/internal/carry"
 )
 
-const resourcesUsage = `compose-carry resources --config compose.json --docker-context NAME [--format text|json]
+const resourcesUsage = `compose-carry resources (--config compose.json | --manifest resources.json) --docker-context NAME [--resource-map names.json] [--format text|json]
 Checks referenced external volumes/networks through the selected Docker context.
 May contact a remote daemon. Does not verify contents, settings or application readiness.
 Exit: 0 at least one resource and all present; 1 missing/unverified/no resources; 2 input/output error.
@@ -99,7 +99,9 @@ func runResources(args []string, out, errOut io.Writer, runner resourceRunner) i
 	fail := func(message string) int { fmt.Fprintln(errOut, "error:", message); return 2 }
 	flags := flag.NewFlagSet("resources", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	var config, dockerContext, format string
+	var config, manifest, resourceMap, dockerContext, format string
+	flags.StringVar(&manifest, "manifest", "", "exported resource manifest")
+	flags.StringVar(&resourceMap, "resource-map", "", "exact source-to-target resource name map")
 	flags.StringVar(&config, "config", "", "rendered Compose JSON")
 	flags.StringVar(&dockerContext, "docker-context", "", "explicit Docker context")
 	flags.StringVar(&format, "format", "text", "text or json")
@@ -112,18 +114,40 @@ func runResources(args []string, out, errOut io.Writer, runner resourceRunner) i
 		}
 		return fail("invalid resources arguments; use resources --help")
 	}
-	if flags.NArg() != 0 || config == "" || dockerContext == "" || strings.TrimSpace(dockerContext) != dockerContext || strings.HasPrefix(dockerContext, "-") || strings.IndexFunc(dockerContext, unicode.IsControl) >= 0 || (format != "text" && format != "json") {
-		return fail("resources requires --config, an explicit --docker-context, and --format text|json")
+	if flags.NArg() != 0 || (config == "") == (manifest == "") || dockerContext == "" || strings.TrimSpace(dockerContext) != dockerContext || strings.HasPrefix(dockerContext, "-") || strings.IndexFunc(dockerContext, unicode.IsControl) >= 0 || (format != "text" && format != "json") {
+		return fail("resources requires exactly one of --config or --manifest, an explicit --docker-context, and --format text|json")
 	}
-	data, err := carry.ReadInput(config)
+	input := config
+	if manifest != "" {
+		input = manifest
+	}
+	data, err := carry.ReadInput(input)
 	if err != nil {
 		return fail(err.Error())
 	}
-	resources, err := carry.ParseResources(data)
+	var resources []carry.Resource
+	if manifest != "" {
+		var decoded carry.ResourceManifest
+		decoded, err = carry.DecodeResourceManifest(data)
+		resources = decoded.Resources
+	} else {
+		resources, err = carry.ParseResources(data)
+	}
 	if err != nil {
 		return fail(err.Error())
 	}
-	report := carry.CheckResources(resources, dockerContext, func(kind string) ([]byte, error) {
+	var mapping carry.ResourceMap
+	if resourceMap != "" {
+		data, err = carry.ReadInput(resourceMap)
+		if err != nil {
+			return fail(err.Error())
+		}
+		mapping, err = carry.ParseResourceMap(data)
+		if err != nil {
+			return fail(err.Error())
+		}
+	}
+	report, err := carry.CheckResourcesWithMap(resources, dockerContext, mapping, func(kind string) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		args := []string{"--context", dockerContext, kind, "ls"}
@@ -134,6 +158,9 @@ func runResources(args []string, out, errOut io.Writer, runner resourceRunner) i
 		}
 		return runner(ctx, args...)
 	})
+	if err != nil {
+		return fail(err.Error())
+	}
 	if format == "json" {
 		encoder := json.NewEncoder(out)
 		encoder.SetIndent("", "  ")
@@ -151,7 +178,7 @@ func runResources(args []string, out, errOut io.Writer, runner resourceRunner) i
 		}
 		for _, result := range report.Results {
 			refs, _ := json.Marshal(result.References)
-			if _, err := fmt.Fprintf(out, "%-10s kind=%s name=%q reason=%s references=%s\n", result.Status, result.Kind, result.Name, result.Reason, refs); err != nil {
+			if _, err := fmt.Fprintf(out, "%-10s kind=%s name=%q checked_name=%q reason=%s references=%s\n", result.Status, result.Kind, result.Name, result.CheckedName, result.Reason, refs); err != nil {
 				return fail("cannot write resource report")
 			}
 			if result.Hint != "" {
