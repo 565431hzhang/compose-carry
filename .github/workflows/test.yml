@@ -84,7 +84,7 @@ jobs:
           if ((go env GOARCH) -ne $env:EXPECTED_ARCH) { throw 'Wrong native architecture' }
           go version
           $files = gofmt -l .
-          if ($LASTEXITCODE -ne 0 -or $files) { throw 'Formatting check failed' }
+          if ($LASTEXITCODE -ne 0 -or $files) { $files; throw 'Formatting check failed' }
       - run: go test -count=1 ./...
       - run: go vet ./...
       - name: Build installable packages locally
