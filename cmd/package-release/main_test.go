@@ -6,6 +6,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"debug/elf"
+	"debug/macho"
+	"debug/pe"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/565431hzhang/compose-carry/internal/buildinfo"
+	"github.com/565431hzhang/compose-carry/internal/carry"
 )
 
 func readArchive(t *testing.T, filename string) []member {
@@ -69,6 +74,9 @@ func readArchive(t *testing.T, filename string) []member {
 			}
 			members = append(members, member{header.Name, data, header.Mode})
 		}
+		if _, err := io.Copy(io.Discard, compressed); err != nil {
+			t.Fatal("invalid gzip trailer", err)
+		}
 	}
 	return members
 }
@@ -116,6 +124,135 @@ func TestVersionAndEnvironment(t *testing.T) {
 	}
 }
 
+func binaryMatches(data []byte, goos, arch string) bool {
+	r := bytes.NewReader(data)
+	switch goos {
+	case "linux":
+		f, err := elf.NewFile(r)
+		if err != nil {
+			return false
+		}
+		defer f.Close()
+		want := map[string]elf.Machine{"amd64": elf.EM_X86_64, "arm64": elf.EM_AARCH64}
+		return f.Class == elf.ELFCLASS64 && f.Machine == want[arch]
+	case "windows":
+		f, err := pe.NewFile(r)
+		if err != nil {
+			return false
+		}
+		defer f.Close()
+		want := map[string]uint16{"amd64": pe.IMAGE_FILE_MACHINE_AMD64, "arm64": pe.IMAGE_FILE_MACHINE_ARM64}
+		_, is64 := f.OptionalHeader.(*pe.OptionalHeader64)
+		return is64 && f.Machine == want[arch]
+	case "darwin":
+		f, err := macho.NewFile(r)
+		if err != nil {
+			return false
+		}
+		defer f.Close()
+		want := map[string]macho.Cpu{"amd64": macho.CpuAmd64, "arm64": macho.CpuArm64}
+		return f.Magic == macho.Magic64 && f.Cpu == want[arch]
+	}
+	return false
+}
+
+func TestTargetMatrix(t *testing.T) {
+	want := []struct{ os, arch, ext string }{
+		{"linux", "amd64", "tar.gz"}, {"linux", "arm64", "tar.gz"},
+		{"windows", "amd64", "zip"}, {"windows", "arm64", "zip"},
+		{"darwin", "amd64", "tar.gz"}, {"darwin", "arm64", "tar.gz"},
+	}
+	if !reflect.DeepEqual(targets, want) {
+		t.Fatal("incomplete platform matrix", targets)
+	}
+	for _, target := range targets {
+		if binaryMatches([]byte("not executable"), target.os, target.arch) {
+			t.Fatal("invalid binary accepted")
+		}
+	}
+}
+
+func smokeOffline(t *testing.T, executable string) {
+	t.Helper()
+	root := t.TempDir()
+	invoke := func(want int, args ...string) []byte {
+		t.Helper()
+		cmd := exec.Command(executable, args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if err != nil {
+			if exit, ok := err.(*exec.ExitError); ok {
+				code = exit.ExitCode()
+			} else {
+				t.Fatal(err)
+			}
+		}
+		if code != want {
+			t.Fatalf("%v exit=%d want=%d: %s", args, code, want, out)
+		}
+		return out
+	}
+	input := []byte(`{"services":{"app":{"volumes":[{"type":"bind","source":"/srv/data","target":"/data"},{"type":"volume","source":"external","target":"/external"}]}},"volumes":{"external":{"external":true,"name":"shared"}}}`)
+	config := filepath.Join(root, "compose.json")
+	if err := os.WriteFile(config, input, 0600); err != nil {
+		t.Fatal(err)
+	}
+	deps, err := carry.ParseCompose(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dep carry.Dependency
+	for _, d := range deps {
+		if d.Kind == "bind" {
+			dep = d
+		}
+	}
+	o := carry.Observation{State: "observed", Type: "directory"}
+	source := carry.Snapshot{Version: carry.Version, Phase: "source", Entries: []carry.Entry{{Dependency: dep, Expected: "directory", Source: o}}}
+	target := carry.Snapshot{Version: carry.Version, Phase: "target", Entries: []carry.Entry{{Dependency: dep, Expected: "directory", Source: o, Target: &o}}}
+	sp, tp := filepath.Join(root, "source.json"), filepath.Join(root, "target.json")
+	if err := carry.WriteSnapshot(sp, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := carry.WriteSnapshot(tp, target); err != nil {
+		t.Fatal(err)
+	}
+	out := invoke(0, "compare", "--source", sp, "--target", tp, "--format", "json")
+	var report carry.Report
+	if json.Unmarshal(out, &report) != nil || report.ExitCode != 0 || report.Summary.Matched != 1 {
+		t.Fatal(string(out))
+	}
+	manifest := filepath.Join(root, "resources.json")
+	invoke(0, "resource-manifest", "--config", config, "--out", manifest)
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := carry.DecodeResourceManifest(data)
+	if err != nil || len(m.Resources) != 1 || m.Resources[0].Name != "shared" {
+		t.Fatal(m, err)
+	}
+	if runtime.GOOS != "linux" {
+		for _, args := range [][]string{
+			{"source", "--config", config, "--out", "no-source.json"},
+			{"target", "--manifest", sp, "--out", "no-target.json"},
+			{"export", "--config", config, "--out", "no-bundle.json"},
+			{"check", "--bundle", "missing.json"},
+		} {
+			if out := invoke(2, args...); !strings.Contains(string(out), "requires Linux") {
+				t.Fatal(string(out))
+			}
+		}
+		for _, name := range []string{"no-source.json", "no-target.json", "no-bundle.json", "carry.json"} {
+			if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
+				t.Fatal("unexpected scan output", name)
+			}
+		}
+	}
+	t.Logf("native %s/%s package: offline comparison, manifest export and platform guards passed", runtime.GOOS, runtime.GOARCH)
+}
+
 func TestReleaseArtifacts(t *testing.T) {
 	root := os.Getenv("COMPOSE_CARRY_RELEASE_DIR")
 	if root == "" {
@@ -133,6 +270,7 @@ func TestReleaseArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	nativeCount := 0
 	for i, target := range targets {
 		name := fmt.Sprintf("compose-carry_%s_%s_%s.%s", buildinfo.Version, target.os, target.arch, target.ext)
 		filename := filepath.Join(root, name)
@@ -160,7 +298,19 @@ func TestReleaseArtifacts(t *testing.T) {
 		if members[0].mode != 0755 {
 			t.Fatal("binary not executable")
 		}
+		if !binaryMatches(members[0].data, target.os, target.arch) {
+			t.Fatal("binary header mismatch", name)
+		}
+		for _, other := range targets {
+			if other.os == target.os && other.arch == target.arch {
+				continue
+			}
+			if binaryMatches(members[0].data, other.os, other.arch) {
+				t.Fatal("accepted wrong target header", name, other)
+			}
+		}
 		if target.os == runtime.GOOS && target.arch == runtime.GOARCH {
+			nativeCount++
 			executable := filepath.Join(t.TempDir(), binary)
 			if err := os.WriteFile(executable, members[0].data, 0755); err != nil {
 				t.Fatal(err)
@@ -173,6 +323,10 @@ func TestReleaseArtifacts(t *testing.T) {
 			if err != nil || !strings.Contains(string(output), buildinfo.Version) {
 				t.Fatal("package help failed", err)
 			}
+			smokeOffline(t, executable)
 		}
+	}
+	if nativeCount != 1 {
+		t.Fatalf("expected one native package execution, got %d", nativeCount)
 	}
 }

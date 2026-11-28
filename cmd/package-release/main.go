@@ -22,7 +22,11 @@ import (
 var versionPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 var commitPattern = regexp.MustCompile(`^[a-f0-9]{40,64}$`)
 var archiveTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-var targets = []struct{ os, arch, ext string }{{"linux", "amd64", "tar.gz"}, {"linux", "arm64", "tar.gz"}, {"windows", "amd64", "zip"}}
+var targets = []struct{ os, arch, ext string }{
+	{"linux", "amd64", "tar.gz"}, {"linux", "arm64", "tar.gz"},
+	{"windows", "amd64", "zip"}, {"windows", "arm64", "zip"},
+	{"darwin", "amd64", "tar.gz"}, {"darwin", "arm64", "tar.gz"},
+}
 
 type member struct {
 	name string

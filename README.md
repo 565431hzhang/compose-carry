@@ -6,7 +6,7 @@
 
 `compose-carry` compares the source host's bind mounts and file-backed configs/secrets with paths on the destination host. It answers a small question: **which listed paths are missing, have the wrong type, or could not be checked?**
 
-It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.6 is an early CLI: Linux host-path scanning, portable offline comparison, and an optional Docker CLI-based external resource check. Docker Compose exports your configuration; `resources` and the external-resource section of `check` require Docker CLI access to a daemon.
+It is not a backup tool, a migration executor, a Compose linter, or a guarantee that your application will start. v0.7 is an early CLI: Linux host-path scanning, portable offline comparison, and an optional Docker CLI-based external resource check. Docker Compose exports your configuration; `resources` and the external-resource section of `check` require Docker CLI access to a daemon.
 
 ## Quick start: one bundle, two commands (Linux)
 
@@ -49,7 +49,14 @@ Binary packages are published only after a release draft is reviewed. If the [Re
 | --- | --- | --- |
 | Linux x86-64 | `linux_amd64.tar.gz` | All commands |
 | Linux ARM64 | `linux_arm64.tar.gz` | All commands; current source and packages tested on native ARM64 CI |
-| Windows x86-64 | `windows_amd64.zip` | Offline compare and Docker resources; no path scan |
+| Windows x86-64 | `windows_amd64.zip` | Compare, resource-manifest, resources; no path scan |
+| Windows ARM64 | `windows_arm64.zip` | Compare, resource-manifest, resources; no path scan |
+| macOS Intel | `darwin_amd64.tar.gz` | Compare, resource-manifest, resources; no path scan |
+| macOS Apple Silicon | `darwin_arm64.tar.gz` | Compare, resource-manifest, resources; no path scan |
+
+The additional macOS and Windows ARM64 packages require v0.7.0 or a current source build; older releases retain their original asset set. Native validation checks `GOOS/GOARCH` and executes the corresponding package, not an emulated executable. Docker queries require a configured Docker CLI/context; desktop CI uses injected query tests, not a real Docker Desktop daemon.
+
+Docker Desktop generally runs its Linux daemon in a VM. Paths on macOS or Windows do not prove that the daemon sees the same filesystem. `source`, `target`, `export`, and `check` remain Linux-only; run them in the daemon's corresponding Linux filesystem namespace.
 
 Download the package for your host and `SHA256SUMS` from the **same version** into a new empty directory. On Linux, verify the downloaded package before extracting (replace VERSION and ARCH with the selected release and architecture):
 
@@ -64,7 +71,21 @@ install -m 0755 unpacked/compose-carry "$HOME/.local/bin/compose-carry"
 
 Require an `OK` for the archive you downloaded; do not proceed on an error or if nothing was checked. Add `$HOME/.local/bin` to your shell PATH if needed. No root privileges are required.
 
-On Windows, compare the hash to the matching filename in `SHA256SUMS` before extraction:
+On macOS, select `amd64` for Intel or `arm64` for Apple Silicon. Compare the printed hash to the exact filename in `SHA256SUMS` before extraction:
+
+```sh
+shasum -a 256 compose-carry_VERSION_darwin_ARCH.tar.gz
+cat SHA256SUMS
+mkdir unpacked
+tar -xzf compose-carry_VERSION_darwin_ARCH.tar.gz -C unpacked
+mkdir -p "$HOME/.local/bin"
+install -m 0755 unpacked/compose-carry "$HOME/.local/bin/compose-carry"
+"$HOME/.local/bin/compose-carry" --version
+```
+
+macOS packages are not Developer ID signed or Apple-notarized; a Go linker ad-hoc signature is not publisher authentication. Windows packages are not Authenticode signed. If the OS blocks execution, review its normal per-app security approval after verifying the source, or build from source; do not disable Gatekeeper or antivirus globally.
+
+On Windows, select `amd64` for Intel/AMD or `arm64` for ARM devices (replace amd64 in the example). Compare the hash to the matching filename in `SHA256SUMS` before extraction:
 
 ```powershell
 Get-FileHash .\compose-carry_VERSION_windows_amd64.zip -Algorithm SHA256
@@ -291,7 +312,7 @@ Linux tests exercise ancestor symlinks, FIFOs, missing/type-mismatched paths, no
 COMPOSE_CARRY_TEST_COMPOSE=1 go test ./cmd/compose-carry -run TestComposeExport -v
 ```
 
-That test invokes `docker compose config`, not `up`, and pulls no images. The native Linux CI jobs run race, Compose export, Docker resource and package smoke tests on both AMD64 and ARM64. Windows tests cover offline comparison and explicit scan rejection.
+That test invokes `docker compose config`, not `up`, and pulls no images. The native Linux CI jobs run race, Compose export, Docker resource and package smoke tests on both AMD64 and ARM64. Windows and macOS tests cover offline comparison, resource-manifest export, injected Docker queries and explicit scan rejection.
 
 To explicitly test against a disposable Docker daemon, the integration test creates uniquely named empty volumes and internal networks, removes them by recorded name/ID, and verifies cleanup. It never starts containers:
 
@@ -307,7 +328,7 @@ Two source jobs run concurrently on standard `ubuntu-24.04` and `ubuntu-24.04-ar
 
 Two destination jobs then run concurrently, checking an actual AMD64-generated export bundle on native ARM64 and the reverse. Each bundle includes the source path snapshot and minimal resource manifest; tests cover missing resources, context-required diagnostics, repairs, both maps and strict exclusions without copying the source Compose configuration or writing a target snapshot. Only a small synthetic bundle, bounded with its envelope to 16 KiB after base64 encoding, crosses jobs through outputs; missing/mismatched outputs fail the test. No QEMU or external relay is used. These are container-isolated environments, not two physical servers.
 
-All jobs require a public repository and use standard runners. Linux jobs stop after 25 minutes, Windows after 10. Setup caches are disabled; no Actions artifacts or persistent build caches are uploaded. Packages exist only temporarily on the runner and are removed after tests. DinD containers and their anonymous volumes are removed on normal/failure exits with an always-run fallback; GitHub disposes of the runner after hard cancellation. Explicit tag-triggered Release attachments are separate from test artifacts. Free execution relies on GitHub's public-repository standard-runner policy; these safeguards do not control other account workflows or charges.
+All jobs require a public repository and use standard runners. All test jobs stop after 25 minutes. Desktop jobs use standard `windows-2022`, `windows-11-arm`, `macos-15-intel` and `macos-15`, with explicit native OS/architecture assertions. Setup caches are disabled; no Actions artifacts or persistent build caches are uploaded. Packages exist only temporarily on the runner and are removed after tests. DinD containers and their anonymous volumes are removed on normal/failure exits with an always-run fallback; GitHub disposes of the runner after hard cancellation. Explicit tag-triggered Release attachments are separate from test artifacts. Free execution relies on GitHub's public-repository standard-runner policy; these safeguards do not control other account workflows or charges.
 
 ## Packaging and release review
 
@@ -318,9 +339,9 @@ go run ./cmd/package-release --out dist
 COMPOSE_CARRY_RELEASE_DIR=../../dist go test ./cmd/package-release -run TestReleaseArtifacts -count=1 -v
 ```
 
-`dist` must not exist. The packager produces three archives and a separate `SHA256SUMS`, with only the executable, license and two READMEs in each archive. `internal/buildinfo/version.go` is the single version source; `--version vX.Y.Z` must match it. Source builds show `commit dev`, while packaged binaries embed the actual commit. Archives have fixed metadata/order; byte reproducibility across different Go versions is not promised.
+`dist` must not exist. The packager produces six archives and a separate `SHA256SUMS`, with only the executable, license and two READMEs in each archive. `internal/buildinfo/version.go` is the single version source; `--version vX.Y.Z` must match it. Source builds show `commit dev`, while packaged binaries embed the actual commit. Archives have fixed metadata/order; byte reproducibility across different Go versions is not promised.
 
-The tag-triggered release workflow accepts only `vMAJOR.MINOR.PATCH` matching the source version, waits for the Linux/Windows test workflow, and creates a **draft** release. No tag is pushed automatically. An existing release is never overwritten; review notes and assets before manually publishing. CI is configured to check package hashes/contents and execute native Windows amd64 and Linux amd64/arm64 packages. Consult the corresponding workflow result for actual validation; historical release notes are not rewritten.
+The tag-triggered release workflow accepts only `vMAJOR.MINOR.PATCH` matching the source version, waits for the Linux/Windows/macOS test workflow, and creates a **draft** release. No tag is pushed automatically. An existing release is never overwritten; review notes and assets before manually publishing. CI is configured to check package hashes/contents and execute native Windows, macOS and Linux amd64/arm64 packages. Consult the corresponding workflow result for actual validation; historical release notes are not rewritten.
 
 ## Direction
 

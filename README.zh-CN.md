@@ -6,7 +6,7 @@
 
 把 Compose 文件复制过去，不代表宿主机上的配置文件、密钥文件和挂载目录也齐全。本工具对照源机快照，报告目标机的路径缺失、类型不符与未验证项。
 
-v0.6 是早期命令行版本：Linux 主机路径扫描、跨平台离线比较，以及可选的 Docker CLI 外部资源检查；resources 和 check 的外部资源部分需要 Docker CLI 访问 daemon。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
+v0.7 是早期命令行版本：Linux 主机路径扫描、跨平台离线比较，以及可选的 Docker CLI 外部资源检查；resources 和 check 的外部资源部分需要 Docker CLI 访问 daemon。它不是备份工具、迁移执行器或 Compose lint；检查通过**不保证应用能启动、数据完整或权限正确**。
 
 ## 快速上手：一个检查包，两个命令（Linux）
 
@@ -49,7 +49,14 @@ check 只有在至少存在一项范围内依赖且全部通过时返回 `0`；�
 | --- | --- | --- |
 | Linux x86-64 | `linux_amd64.tar.gz` | 全部命令 |
 | Linux ARM64 | `linux_arm64.tar.gz` | 全部命令；当前源码及安装包已通过原生 ARM64 CI |
-| Windows x86-64 | `windows_amd64.zip` | 离线比较和 Docker 资源查询，不支持路径扫描 |
+| Windows x86-64 | `windows_amd64.zip` | compare、resource-manifest、resources；不支持路径扫描 |
+| Windows ARM64 | `windows_arm64.zip` | compare、resource-manifest、resources；不支持路径扫描 |
+| macOS Intel | `darwin_amd64.tar.gz` | compare、resource-manifest、resources；不支持路径扫描 |
+| macOS Apple Silicon | `darwin_arm64.tar.gz` | compare、resource-manifest、resources；不支持路径扫描 |
+
+新增 macOS 和 Windows ARM64 安装包需要 v0.7.0 或当前源码构建，旧发行附件不变。原生验证核对 GOOS/GOARCH 并执行匹配的安装包，不用模拟器替代。资源查询需要配置好的 Docker CLI/context；桌面平台 CI 使用注入查询测试，不代表已实测 Docker Desktop daemon。
+
+Docker Desktop 通常把 Linux daemon 放在虚拟机中，macOS/Windows 主机路径不能证明 daemon 看见相同文件系统。因此 source、target、export、check 仍仅支持 Linux，须在 daemon 对应的 Linux 文件系统命名空间内运行。
 
 从同一发行版本下载所需压缩包与 `SHA256SUMS`，放到新的空目录。Linux 先校验再解压（将 VERSION、ARCH 换成实际版本、架构）：
 
@@ -64,7 +71,21 @@ install -m 0755 unpacked/compose-carry "$HOME/.local/bin/compose-carry"
 
 必须看到所下载包的 `OK`；报错或没有检查任何包都不能继续。需要时将 `$HOME/.local/bin` 加入 shell PATH，无需 root。
 
-Windows 对照 `SHA256SUMS` 中相同文件名的哈希，完全一致后再解压安装：
+macOS Intel 选择 amd64，Apple Silicon 选择 arm64。先对照 SHA256SUMS 中完全相同文件名的哈希，一致后才解压：
+
+```sh
+shasum -a 256 compose-carry_VERSION_darwin_ARCH.tar.gz
+cat SHA256SUMS
+mkdir unpacked
+tar -xzf compose-carry_VERSION_darwin_ARCH.tar.gz -C unpacked
+mkdir -p "$HOME/.local/bin"
+install -m 0755 unpacked/compose-carry "$HOME/.local/bin/compose-carry"
+"$HOME/.local/bin/compose-carry" --version
+```
+
+macOS 包未使用 Developer ID 签名或 Apple 公证；Go 链接器的 ad-hoc 签名不代表发布者身份认证。Windows 包未进行 Authenticode 签名。系统拦截时，应先核实来源，再使用系统正常的单应用安全审核方式或从源码构建，不要全局关闭 Gatekeeper 或杀毒保护。
+
+Windows Intel/AMD 设备选择 amd64，ARM 设备选择 arm64（替换示例中的 amd64）。对照 `SHA256SUMS` 中相同文件名的哈希，完全一致后再解压安装：
 
 ```powershell
 Get-FileHash .\compose-carry_VERSION_windows_amd64.zip -Algorithm SHA256
@@ -290,7 +311,7 @@ Linux 测试覆盖缺失、类型变化、祖先符号链接、FIFO、非 root �
 COMPOSE_CARRY_TEST_COMPOSE=1 go test ./cmd/compose-carry -run TestComposeExport -v
 ```
 
-该测试只运行 `docker compose config`，不启动容器或拉镜像。原生 Linux CI 在 AMD64、ARM64 上执行 race、Compose 导出、Docker 资源检查和安装包冒烟测试；Windows 测试覆盖离线比较和拒绝扫描。
+该测试只运行 `docker compose config`，不启动容器或拉镜像。原生 Linux CI 在 AMD64、ARM64 上执行 race、Compose 导出、Docker 资源检查和安装包冒烟测试；Windows/macOS 测试覆盖离线比较、资源清单导出、注入 Docker 查询和拒绝扫描。
 
 显式在可用于测试的 Docker daemon 上验收资源检查：测试会创建唯一命名的空卷和内部网络，按记录的名称/ID 删除并确认清理，不启动容器。
 
@@ -306,7 +327,7 @@ COMPOSE_CARRY_TEST_RESOURCES=1 go test ./cmd/compose-carry -run TestDockerResour
 
 随后两个目标端 job 并行，分别在原生 ARM64 检查 AMD64 实际导出的统一检查包，以及反方向核对。包内含源路径快照与最小资源清单，覆盖缺失、未指定 context、修复、两种映射和严格排除策略；不复制源 Compose 配置，不写目标快照。合成检查包及架构/提交封套合计编码后不超过16 KiB，仅通过 job outputs 传递，输出缺失、架构或提交不匹配直接失败；不用 QEMU 或外部中转。这是容器隔离测试，不等同于两台物理机。
 
-所有 job 要求公开仓库，只使用标准 runner；Linux 最长25分钟、Windows 最长10分钟。关闭缓存，不上传 Actions artifacts 或持久构建缓存；安装包只在 runner 临时生成，测试后删除。DinD 容器及匿名卷由 finally 和 always 步骤清理；硬取消后由 GitHub 销毁临时 runner。显式标签发行附件与测试产物分开。免费依赖 GitHub 的公开仓库标准 runner 政策，不代表能控制账号其他工作流或费用。
+所有 job 要求公开仓库，只使用标准 runner；全部测试 job 最长25分钟。桌面平台固定使用标准 windows-2022、windows-11-arm、macos-15-intel、macos-15，并断言原生系统与架构。关闭缓存，不上传 Actions artifacts 或持久构建缓存；安装包只在 runner 临时生成，测试后删除。DinD 容器及匿名卷由 finally 和 always 步骤清理；硬取消后由 GitHub 销毁临时 runner。显式标签发行附件与测试产物分开。免费依赖 GitHub 的公开仓库标准 runner 政策，不代表能控制账号其他工作流或费用。
 
 ## 打包与发行审核
 
@@ -317,9 +338,9 @@ go run ./cmd/package-release --out dist
 COMPOSE_CARRY_RELEASE_DIR=../../dist go test ./cmd/package-release -run TestReleaseArtifacts -count=1 -v
 ```
 
-`dist` 必须不存在。生成三个压缩包与独立的 `SHA256SUMS`，每包仅含程序、许可证和两份 README。版本单源为 `internal/buildinfo/version.go`，传入 `--version vX.Y.Z` 时必须一致。源码构建显示 `commit dev`，发行包嵌入实际提交号。压缩包元数据和顺序固定，但不承诺不同 Go 版本间逐字节可重复。
+`dist` 必须不存在。生成六个压缩包与独立的 `SHA256SUMS`，每包仅含程序、许可证和两份 README。版本单源为 `internal/buildinfo/version.go`，传入 `--version vX.Y.Z` 时必须一致。源码构建显示 `commit dev`，发行包嵌入实际提交号。压缩包元数据和顺序固定，但不承诺不同 Go 版本间逐字节可重复。
 
-标签发行工作流只接受与源码版本一致的 `vMAJOR.MINOR.PATCH`，等待 Linux/Windows 测试通过后创建**草稿**。不会自动推送标签或覆盖已有发行；人工检查说明和附件后再公开。CI 配置为核对包内容、哈希并执行原生 Windows amd64、Linux amd64/arm64 程序；实际验证以对应工作流结果为准，不重写历史发行说明。
+标签发行工作流只接受与源码版本一致的 `vMAJOR.MINOR.PATCH`，等待 Linux/Windows/macOS 测试通过后创建**草稿**。不会自动推送标签或覆盖已有发行；人工检查说明和附件后再公开。CI 配置为核对包内容、哈希并执行原生 Windows、macOS、Linux 的 amd64/arm64 程序；实际验证以对应工作流结果为准，不重写历史发行说明。
 
 ## 后续方向
 

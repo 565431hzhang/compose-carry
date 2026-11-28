@@ -51,4 +51,4 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS \
             --verify-tag --draft --title "compose-carry $RELEASE_TAG" \
-            --notes 'Draft: review the packages and add release notes before publishing. Verify SHA256SUMS before extracting. Linux supports path scanning; Windows supports offline comparison and Docker resource queries. Checks do not guarantee migration readiness. Built with AI assistance.'
+            --notes 'Draft: review the packages and add release notes before publishing. Verify SHA256SUMS before extracting. Linux supports path scanning; Windows and macOS support offline comparison, manifest export and Docker resource queries. macOS packages are not Developer ID signed or notarized; Windows packages are not Authenticode signed. Checks do not guarantee migration readiness. Built with AI assistance.'
