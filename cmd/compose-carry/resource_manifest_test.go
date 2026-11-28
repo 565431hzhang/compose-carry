@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -82,6 +85,60 @@ func TestManifestCLI(t *testing.T) {
 	}
 	if code := runResources([]string{"--manifest", manifest, "--docker-context", "target"}, &out, &stderr, never); code != 2 {
 		t.Fatal(code)
+	}
+}
+
+func TestLargeResourceManifestBinary(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "compose-carry")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	const count = 320
+	services, volumes, networks := map[string]any{}, map[string]any{}, map[string]any{}
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("item-%04d", i)
+		services[key] = map[string]any{
+			"volumes":     []any{map[string]string{"type": "volume", "source": key, "target": "/data"}},
+			"networks":    map[string]any{key: nil},
+			"environment": map[string]string{"TOKEN": "private-not-exported"},
+		}
+		volumes[key] = map[string]any{"external": true, "name": "external-" + key}
+		networks[key] = map[string]any{"external": true, "name": "external-" + key}
+	}
+	raw, err := json.Marshal(map[string]any{"services": services, "volumes": volumes, "networks": networks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, manifest := filepath.Join(root, "compose.json"), filepath.Join(root, "resources.json")
+	if err := os.WriteFile(config, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(binary, "resource-manifest", "--config", config, "--out", manifest).CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	raw, err = os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "private-not-exported") {
+		t.Fatal("retained environment value")
+	}
+	m, err := carry.DecodeResourceManifest(raw)
+	if err != nil || len(m.Resources) != 2*count {
+		t.Fatalf("resources=%d error=%v", len(m.Resources), err)
+	}
+	for i, r := range m.Resources {
+		key, kind := fmt.Sprintf("item-%04d", i%count), "network"
+		if i >= count {
+			kind = "volume"
+		}
+		if r.Kind != kind || r.Name != "external-"+key || len(r.References) != 1 || r.References[0] != (carry.ResourceReference{Service: key, Key: key}) {
+			t.Fatalf("incorrect resource: %+v", r)
+		}
 	}
 }
 

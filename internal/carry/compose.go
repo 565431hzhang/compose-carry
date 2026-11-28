@@ -138,6 +138,7 @@ func parseCompose(data []byte) ([]Dependency, error) {
 		return nil, err
 	}
 	deps := []Dependency{}
+	definitionsByKind := map[string]map[string]json.RawMessage{}
 	for service, raw := range services {
 		if service == "" {
 			return nil, errors.New("empty service")
@@ -194,9 +195,13 @@ func parseCompose(data []byte) ([]Dependency, error) {
 				if name == "" {
 					return nil, errors.New("empty reference")
 				}
-				definitions, err := object(root[field])
-				if err != nil {
-					return nil, err
+				definitions := definitionsByKind[field]
+				if definitions == nil {
+					definitions, err = object(root[field])
+					if err != nil {
+						return nil, err
+					}
+					definitionsByKind[field] = definitions
 				}
 				def, err := object(definitions[name])
 				if err != nil {

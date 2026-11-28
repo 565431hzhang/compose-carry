@@ -205,8 +205,19 @@ func TestBundleBinaryDefaults(t *testing.T) {
 	if err := os.WriteFile(file, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	raw := fmt.Sprintf(`{"services":{"app":{"configs":["c"]}},"configs":{"c":{"file":%q}}}`, file)
-	if err := os.WriteFile(filepath.Join(root, "compose.json"), []byte(raw), 0600); err != nil {
+	const count = 320
+	services, configs, secrets := map[string]any{}, map[string]any{}, map[string]any{}
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("item-%04d", i)
+		services[key] = map[string]any{"configs": []string{key}, "secrets": []string{key}}
+		configs[key] = map[string]string{"file": file}
+		secrets[key] = map[string]string{"file": file}
+	}
+	raw, err := json.Marshal(map[string]any{"services": services, "configs": configs, "secrets": secrets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "compose.json"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"export", "--config", "compose.json"}, {"check", "--format", "json"}} {
@@ -219,7 +230,7 @@ func TestBundleBinaryDefaults(t *testing.T) {
 		}
 		if args[0] == "check" {
 			var r carry.BundleReport
-			if json.Unmarshal(out, &r) != nil || r.ExitCode != 0 || r.Paths.Summary.Matched != 1 || len(r.Paths.Results) != 0 {
+			if json.Unmarshal(out, &r) != nil || r.ExitCode != 0 || r.Paths.Summary.Matched != 2*count || r.Paths.Checked != 2*count || len(r.Paths.Results) != 0 {
 				t.Fatal(string(out))
 			}
 		}

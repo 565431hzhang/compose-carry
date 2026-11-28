@@ -118,14 +118,20 @@ func parseResources(data []byte) ([]Resource, error) {
 		return nil, err
 	}
 	found := map[string]*Resource{}
+	definitionsByKind := map[string]map[string]json.RawMessage{}
 	add := func(service, kind, key string, implicit bool) error {
 		definitions, exists := root[kind+"s"]
 		if !exists && implicit {
 			return nil
 		}
-		defs, err := object(definitions)
-		if err != nil {
-			return err
+		defs := definitionsByKind[kind]
+		if defs == nil {
+			var err error
+			defs, err = object(definitions)
+			if err != nil {
+				return err
+			}
+			definitionsByKind[kind] = defs
 		}
 		raw, exists := defs[key]
 		if !exists {

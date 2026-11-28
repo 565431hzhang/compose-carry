@@ -68,6 +68,34 @@ func TestRejectInvalidResources(t *testing.T) {
 	}
 }
 
+func TestResourceDefinitionLookupBoundaries(t *testing.T) {
+	for _, input := range []string{
+		`{"services":{"app":{"network_mode":"none"}},"volumes":null,"networks":42}`,
+		`{"services":{"app":{"volumes":[{"type":"volume","source":"x"}],"networks":["x"]}},"volumes":{"x":{"external":true},"unused":42},"networks":{"x":{"external":true},"unused":false}}`,
+		`{"services":{"app":{"networks":["x"]},"implicit":{}},"networks":{"x":{"external":true}}}`,
+	} {
+		if _, err := ParseResources([]byte(input)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, input := range []string{
+		`{"services":{"app":{"networks":["x"]}},"networks":null}`,
+		`{"services":{"app":{"networks":["x","missing"]}},"networks":{"x":{"external":true}}}`,
+		`{"services":{"app":{"volumes":[{"type":"volume","source":"x"}],"networks":["x"]}},"volumes":{"x":{"external":true}}}`,
+	} {
+		if _, err := ParseResources([]byte(input)); err == nil {
+			t.Fatal("accepted invalid referenced definition")
+		}
+	}
+	for _, name := range []string{"first", "second"} {
+		data := []byte(`{"services":{"app":{"networks":["x"]}},"networks":{"x":{"external":true,"name":"` + name + `"}}}`)
+		resources, err := ParseResources(data)
+		if err != nil || len(resources) != 1 || resources[0].Name != name {
+			t.Fatalf("definitions leaked across inputs: %v %v", resources, err)
+		}
+	}
+}
+
 func TestResourceInventoryMatching(t *testing.T) {
 	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	tests := []struct{ kind, name, data, status, reason string }{
